@@ -10,9 +10,11 @@ const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const LOGIN_ID = process.env.LOGIN_ID;
 const LICENCE_KEY = process.env.LICENCE_KEY;
 
-// Safety check
+// Basic sanity check (shows in Render logs)
 if (!CLIENT_ID || !CLIENT_SECRET || !LOGIN_ID || !LICENCE_KEY) {
-  console.error("Missing environment variables");
+  console.error("❌ Missing one or more environment variables");
+} else {
+  console.log("✅ Environment variables loaded");
 }
 
 // Cache JWT token
@@ -25,6 +27,8 @@ async function getToken() {
     return cachedToken;
   }
 
+  console.log("🔐 Generating new JWT token...");
+
   const response = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     {
@@ -36,14 +40,22 @@ async function getToken() {
     }
   );
 
+  if (!response.data?.JWTToken) {
+    throw new Error("JWTToken missing in auth response");
+  }
+
   cachedToken = response.data.JWTToken;
-  tokenExpiry = Date.now() + 23 * 60 * 60 * 1000; // 23 hours
+  tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
+  console.log("✅ JWT token generated");
+
   return cachedToken;
 }
 
 // 📦 EDD API
 app.post("/edd", async (req, res) => {
   try {
+    console.log("📦 /edd called with:", req.body);
+
     const { pincode } = req.body;
 
     if (!pincode) {
@@ -57,10 +69,12 @@ app.post("/edd", async (req, res) => {
       .slice(0, 10)
       .replace(/-/g, "");
 
+    console.log("🚚 Calling Blue Dart Transit Time API...");
+
     const response = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/transit-time/v1/GetDomesticTransitTimeForPinCodeandProduct",
       {
-        pPinCodeFrom: "411022", // default origin pincode
+        pPinCodeFrom: "411022",
         pPinCodeTo: pincode,
         pProductCode: "A",
         pSubProductCode: "P",
@@ -81,27 +95,35 @@ app.post("/edd", async (req, res) => {
       }
     );
 
-    const edd =
-      response.data?.GetDomesticTransitTimeForPinCodeandProductResult
-        ?.ExpectedDateDelivery;
+    const result =
+      response.data?.GetDomesticTransitTimeForPinCodeandProductResult;
+
+    console.log("✅ Blue Dart response:", result);
+
+    const edd = result?.ExpectedDateDelivery;
 
     res.json({ edd });
   } catch (error) {
-    console.error(
-      "EDD ERROR:",
-      error.response?.data || error.message
-    );
-    res.status(500).json({ error: "EDD unavailable" });
+    console.error("❌ EDD ERROR FULL:", {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data
+    });
+
+    res.status(500).json({
+      error: "EDD unavailable",
+      details: error.response?.data || error.message
+    });
   }
 });
 
-// ✅ Health check
+// Health check
 app.get("/", (req, res) => {
   res.send("Blue Dart EDD server running");
 });
 
-// Render uses dynamic PORT
+// Render dynamic port
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server started on port", PORT);
+  console.log("🚀 Server started on port", PORT);
 });
