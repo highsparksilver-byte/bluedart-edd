@@ -12,11 +12,11 @@ app.use(express.json());
 
 // 🔑 PASTE JWT GENERATED FROM BLUEDART PORTAL (VALID ~24 HRS)
 const JWT_TOKEN =
-"PASTE_FRESH_JWT_HERE";
+"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdWJqZWN0LXN1YmplY3QiLCJhdWQiOlsiYXVkaWVuY2UxIiwiYXVkaWVuY2UyIl0sImlzcyI6InVybjovL2FwaWdlZS1lZGdlLUpXVC1wb2xpY3ktdGVzdCIsImV4cCI6MTc2ODQwOTYwNSwiaWF0IjoxNzY4MzIzMjA1LCJqdGkiOiI5MGExZjQ2ZS00NzMzLTQ1OTAtODFjOS04YWUxZGNiYWZhZWMifQ.NIQDd34M0YDSbm5anjaEg0PXfK5Tn32Md9gguGQ5enI";
 
 // 🔑 These MUST belong to SAME account/app
 const LOGIN_ID = "PNQ90609";              // replace with yours
-const LICENCE_KEY = "PASTE_LICENCE_KEY";  // replace with yours
+const LICENCE_KEY = "oupkkkosmeqmuqqfsph8korrp8krmouj";  // replace with yours
 
 /*
 ================================================
