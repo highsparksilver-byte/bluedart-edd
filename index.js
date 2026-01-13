@@ -2,53 +2,49 @@ const express = require("express");
 const axios = require("axios");
 
 const app = express();
-
-// ✅ Allow JSON + form data (important later for Shopify)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 🔐 Secrets come ONLY from Render environment variables
+// 🔐 Render environment variables
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const LOGIN_ID = process.env.LOGIN_ID;
 const LICENSE_KEY = process.env.LICENSE_KEY;
 
-// 🧪 Startup log (confirms server boot)
 console.log("Server starting...");
 
-// Simple health check
+// Health check
 app.get("/", (req, res) => {
   res.send("Server alive");
 });
 
-// Cache token
+// Token cache
 let cachedToken = null;
 let tokenExpiry = null;
 
-// 🔐 Get Blue Dart JWT token
+// 🔐 AUTH — EXACTLY as per generateJWT_0.yaml
 async function getToken() {
   if (cachedToken && Date.now() < tokenExpiry) {
     return cachedToken;
   }
 
-  const response = await axios.post(
-    "https://apigateway-sandbox.bluedart.com/in/transportation/auth/v1/login",
-    {
-      clientId: CLIENT_ID
-    },
+  const response = await axios.get(
+    "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     {
       headers: {
-        clientSecret: CLIENT_SECRET
+        ClientID: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        Accept: "application/json"
       }
     }
   );
 
-  cachedToken = response.data.jwtToken;
+  cachedToken = response.data.JWTToken;
   tokenExpiry = Date.now() + 23 * 60 * 60 * 1000; // 23 hours
   return cachedToken;
 }
 
-// 🚚 EDD endpoint
+// 🚚 EDD API (Transit Time)
 app.post("/edd", async (req, res) => {
   try {
     console.log("EDD request received");
@@ -58,14 +54,14 @@ app.post("/edd", async (req, res) => {
 
     const token = await getToken();
 
-    // Format date as YYYYMMDD
+    // YYYYMMDD
     const today = new Date()
       .toISOString()
       .slice(0, 10)
       .replace(/-/g, "");
 
     const response = await axios.post(
-      "https://apigateway-sandbox.bluedart.com/in/transportation/transit-time/v1/getDomesticTransitTimeForPinCodeandProduct",
+      "https://apigateway.bluedart.com/in/transportation/transit-time/v1/GetDomesticTransitTimeForPinCodeandProduct",
       {
         ppinCode: "411022",
         pPinCodeTo: toPincode,
@@ -78,7 +74,9 @@ app.post("/edd", async (req, res) => {
         headers: {
           Authorization: `Bearer ${token}`,
           LoginID: LOGIN_ID,
-          LicenseKey: LICENSE_KEY
+          LicenseKey: LICENSE_KEY,
+          Accept: "application/json",
+          "Content-Type": "application/json"
         }
       }
     );
@@ -88,11 +86,7 @@ app.post("/edd", async (req, res) => {
 
     res.json({ edd });
   } catch (e) {
-    console.error(
-      "EDD ERROR:",
-      e.response?.data || e.message
-    );
-
+    console.error("EDD ERROR:", e.response?.data || e.message);
     res.status(500).json({
       error: "EDD unavailable",
       details: e.response?.data || e.message
@@ -100,7 +94,6 @@ app.post("/edd", async (req, res) => {
   }
 });
 
-// ✅ IMPORTANT: Use Render's PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
