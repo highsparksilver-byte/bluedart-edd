@@ -4,37 +4,33 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-/*
-  🔴 HARD-CODE EVERYTHING BELOW
-  🔴 FOR TESTING ONLY
-*/
+// 🔴 HARD-CODED — THIS IS WHAT WORKED
+// Use a FRESH JWT generated from Blue Dart portal
+const JWT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdWJqZWN0LXN1YmplY3QiLCJhdWQiOlsiYXVkaWVuY2UxIiwiYXVkaWVuY2UyIl0sImlzcyI6InVybjovL2FwaWdlZS1lZGdlLUpXVC1wb2xpY3ktdGVzdCIsImV4cCI6MTc2ODQwOTYwNSwiaWF0IjoxNzY4MzIzMjA1LCJqdGkiOiI5MGExZjQ2ZS00NzMzLTQ1OTAtODFjOS04YWUxZGNiYWZhZWMifQ.NIQDd34M0YDSbm5anjaEg0PXfK5Tn32Md9gguGQ5enI";
 
-// 1️⃣ Paste JWTToken that WORKED in Portal
-const JWT_TOKEN =
-  "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdWJqZWN0LXN1YmplY3QiLCJhdWQiOlsiYXVkaWVuY2UxIiwiYXVkaWVuY2UyIl0sImlzcyI6InVybjovL2FwaWdlZS1lZGdlLUpXVC1wb2xpY3ktdGVzdCIsImV4cCI6MTc2ODQwOTYwNSwiaWF0IjoxNzY4MzIzMjA1LCJqdGkiOiI5MGExZjQ2ZS00NzMzLTQ1OTAtODFjOS04YWUxZGNiYWZhZWMifQ.NIQDd34M0YDSbm5anjaEg0PXfK5Tn32Md9gguGQ5enI";
+// These MUST match the same account that generated the JWT
+const LOGIN_ID = "PNQ90609";              // example – replace with yours
+const LICENCE_KEY = "oupkkkosmeqmuqqfsph8korrp8krmouj";   // replace with yours
 
-// 2️⃣ Paste your actual Blue Dart credentials
-const LOGIN_ID = "PNQ90609";
-const LICENCE_KEY = "oupkkkosmeqmuqqfsph8korrp8krmouj";
+// Legacy date format (required)
+function legacyDate() {
+  return `/Date(${Date.now()})/`;
+}
 
-console.log("🚨 HARD-CODED TEST MODE ENABLED");
-
-// 🔍 TEST ENDPOINT
+// ✅ THIS ENDPOINT WORKED
 app.post("/edd", async (req, res) => {
   try {
-    console.log("📦 Calling Blue Dart with hard-coded credentials");
-
     const response = await axios.post(
-      "https://apigateway.bluedart.com/in/transportation/transit-time/v1/GetDomesticTransitTimeForPinCodeandProduct",
+      "https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct",
       {
         pPinCodeFrom: "411022",
         pPinCodeTo: "400099",
         pProductCode: "A",
         pSubProductCode: "P",
-        pPudate: "20260116",
-        pPickupTime: "1600",
+        pPudate: legacyDate(),
+        pPickupTime: "16:00",
         profile: {
-          Api_type: "T",
+          Api_type: "S",
           LicenceKey: LICENCE_KEY,
           LoginID: LOGIN_ID
         }
@@ -48,15 +44,8 @@ app.post("/edd", async (req, res) => {
       }
     );
 
-    console.log("✅ Blue Dart responded");
-
     res.json(response.data);
   } catch (error) {
-    console.error("❌ HARD TEST FAILED", {
-      status: error.response?.status,
-      data: error.response?.data
-    });
-
     res.status(500).json({
       error: "FAILED",
       status: error.response?.status,
@@ -65,12 +54,10 @@ app.post("/edd", async (req, res) => {
   }
 });
 
-// Health check
 app.get("/", (req, res) => {
-  res.send("Hard-coded Blue Dart test server running");
+  res.send("Blue Dart EDD server running (known-good version)");
 });
 
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
+app.listen(3000, () => {
+  console.log("Server running on port 3000");
 });
