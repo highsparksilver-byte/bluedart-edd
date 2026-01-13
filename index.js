@@ -4,20 +4,25 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// 🔴 PASTE A WORKING JWT TOKEN FROM PORTAL HERE
-const HARDCODED_JWT =
+/*
+  🔴 HARD-CODE EVERYTHING BELOW
+  🔴 FOR TESTING ONLY
+*/
+
+// 1️⃣ Paste JWTToken that WORKED in Portal
+const JWT_TOKEN =
   "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdWJqZWN0LXN1YmplY3QiLCJhdWQiOlsiYXVkaWVuY2UxIiwiYXVkaWVuY2UyIl0sImlzcyI6InVybjovL2FwaWdlZS1lZGdlLUpXVC1wb2xpY3ktdGVzdCIsImV4cCI6MTc2ODQwOTYwNSwiaWF0IjoxNzY4MzIzMjA1LCJqdGkiOiI5MGExZjQ2ZS00NzMzLTQ1OTAtODFjOS04YWUxZGNiYWZhZWMifQ.NIQDd34M0YDSbm5anjaEg0PXfK5Tn32Md9gguGQ5enI";
 
-// 🔴 Blue Dart account credentials (still required)
-const LOGIN_ID = process.env.LOGIN_ID;
-const LICENCE_KEY = process.env.LICENCE_KEY;
+// 2️⃣ Paste your actual Blue Dart credentials
+const LOGIN_ID = "PNQ90609";
+const LICENCE_KEY = "oupkkkosmeqmuqqfsph8korrp8krmouj";
 
-console.log("Starting Blue Dart HARD JWT test server");
+console.log("🚨 HARD-CODED TEST MODE ENABLED");
 
 // 🔍 TEST ENDPOINT
 app.post("/edd", async (req, res) => {
   try {
-    console.log("Calling Blue Dart with hardcoded JWT");
+    console.log("📦 Calling Blue Dart with hard-coded credentials");
 
     const response = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/transit-time/v1/GetDomesticTransitTimeForPinCodeandProduct",
@@ -36,16 +41,18 @@ app.post("/edd", async (req, res) => {
       },
       {
         headers: {
-          JWTToken: HARDCODED_JWT,
+          JWTToken: JWT_TOKEN,
           "Content-Type": "application/json",
           Accept: "application/json"
         }
       }
     );
 
+    console.log("✅ Blue Dart responded");
+
     res.json(response.data);
   } catch (error) {
-    console.error("❌ HARD JWT TEST FAILED", {
+    console.error("❌ HARD TEST FAILED", {
       status: error.response?.status,
       data: error.response?.data
     });
@@ -60,10 +67,10 @@ app.post("/edd", async (req, res) => {
 
 // Health check
 app.get("/", (req, res) => {
-  res.send("Hardcoded JWT test server running");
+  res.send("Hard-coded Blue Dart test server running");
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 app.listen(PORT, () => {
-  console.log("Server listening on port", PORT);
+  console.log("🚀 Server running on port", PORT);
 });
