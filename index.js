@@ -1,33 +1,106 @@
-Ill add some stuff for reference - 
+import express from "express";
+import axios from "axios";
 
-it says on bluedart portal - 
+const app = express();
+app.use(express.json());
 
+// Environment variables (must be set in Render)
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const LOGIN_ID = process.env.LOGIN_ID;
+const LICENCE_KEY = process.env.LICENCE_KEY;
 
-curl --location 'https://apigateway-sandbox.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct' \
---header 'content-type: application/json' \
---header 'JWTToken: REPLACE_KEY_VALUE' \
---data '{"pPinCodeTo":"string","pPickupTime":"string","pPinCodeFrom":"string","profile":{"LoginID":"string","Api_type":"T","LicenceKey":"string"},"pProductCode":"string","pPudate":"string","pSubProductCode":"s"}'
+// Basic startup log
+console.log("Starting Blue Dart EDD test server");
+console.log("Env check:", {
+  CLIENT_ID: !!CLIENT_ID,
+  CLIENT_SECRET: !!CLIENT_SECRET,
+  LOGIN_ID: !!LOGIN_ID,
+  LICENCE_KEY: !!LICENCE_KEY
+});
 
+// 🔴 DO NOT CACHE TOKEN — portal does not cache
+async function generateToken() {
+  const res = await axios.get(
+    "https://apigateway.bluedart.com/in/transportation/token/v1/login",
+    {
+      headers: {
+        ClientID: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        Accept: "application/json"
+      }
+    }
+  );
 
-curl -X 'POST' \
-  'https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct' \
-  -H 'accept: application/json' \
-  -H 'JWTToken: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdWJqZWN0LXN1YmplY3QiLCJhdWQiOlsiYXVkaWVuY2UxIiwiYXVkaWVuY2UyIl0sImlzcyI6InVybjovL2FwaWdlZS1lZGdlLUpXVC1wb2xpY3ktdGVzdCIsImV4cCI6MTc2ODQwOTYwNSwiaWF0IjoxNzY4MzIzMjA1LCJqdGkiOiI5MGExZjQ2ZS00NzMzLTQ1OTAtODFjOS04YWUxZGNiYWZhZWMifQ.NIQDd34M0YDSbm5anjaEg0PXfK5Tn32Md9gguGQ5enI' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "pPinCodeFrom": "411022",
-  "pPinCodeTo": "400099",
-  "pProductCode": "A",
-  "pSubProductCode": "P",
-  "pPudate": "/Date(1653571901000)/",
-  "pPickupTime": "16:00",
-  "profile": {
-    "Api_type": "S",
-    "LicenceKey": "oupkkkosmeqmuqqfsph8korrp8krmouj",
-    "LoginID": "PNQ90609"
+  if (!res.data?.JWTToken) {
+    throw new Error("JWTToken not returned from auth API");
   }
-}'
 
+  return res.data.JWTToken;
+}
 
-Request URL
-https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct
+// 🔍 EXACT PORTAL REPLICATION ENDPOINT
+app.post("/edd", async (req, res) => {
+  try {
+    console.log("---- /edd TEST CALL START ----");
+
+    // 1️⃣ Generate JWT
+    const token = await generateToken();
+    console.log("JWT generated");
+
+    // 2️⃣ Call SAME API portal uses (NEW transit-time API)
+    const response = await axios.post(
+      "https://apigateway.bluedart.com/in/transportation/transit-time/v1/GetDomesticTransitTimeForPinCodeandProduct",
+      {
+        pPinCodeFrom: "411022",
+        pPinCodeTo: "400099",
+        pProductCode: "A",
+        pSubProductCode: "P",
+        pPudate: "20260116",
+        pPickupTime: "1600",
+        profile: {
+          Api_type: "T",
+          LicenceKey: LICENCE_KEY,
+          LoginID: LOGIN_ID
+        }
+      },
+      {
+        headers: {
+          // ⚠️ EXACTLY what portal sends
+          JWTToken: token,
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        }
+      }
+    );
+
+    console.log("Blue Dart response OK");
+
+    // 3️⃣ Return raw response (no processing)
+    res.json(response.data);
+  } catch (error) {
+    console.error("❌ FAILURE");
+
+    console.error({
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
+    });
+
+    res.status(500).json({
+      error: "FAILED",
+      status: error.response?.status,
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Health check
+app.get("/", (req, res) => {
+  res.send("Blue Dart EDD test server running");
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Server listening on port", PORT);
+});
