@@ -4,30 +4,22 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// 🔐 Environment variables (set in Render)
+// 🔐 Environment variables (Render)
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const LOGIN_ID = process.env.LOGIN_ID;
 const LICENCE_KEY = process.env.LICENCE_KEY;
 
-// Sanity check (visible in Render logs)
+// Sanity check
 if (!CLIENT_ID || !CLIENT_SECRET || !LOGIN_ID || !LICENCE_KEY) {
-  console.error("❌ Missing one or more environment variables");
+  console.error("❌ Missing environment variables");
 } else {
   console.log("✅ Environment variables loaded");
 }
 
-// JWT cache
-let cachedToken = null;
-let tokenExpiry = 0;
-
-// 🔑 Generate JWT Token (Blue Dart way)
+// 🔑 Generate JWT token (NO caching for now – avoids gateway edge cases)
 async function getToken() {
-  if (cachedToken && Date.now() < tokenExpiry) {
-    return cachedToken;
-  }
-
-  console.log("🔐 Generating new JWT token...");
+  console.log("🔐 Generating JWT token");
 
   const response = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
@@ -44,18 +36,12 @@ async function getToken() {
     throw new Error("JWTToken missing in auth response");
   }
 
-  cachedToken = response.data.JWTToken;
-  tokenExpiry = Date.now() + 23 * 60 * 60 * 1000; // 23 hours
-  console.log("✅ JWT token generated");
-
-  return cachedToken;
+  return response.data.JWTToken;
 }
 
 // 📦 EDD endpoint
 app.post("/edd", async (req, res) => {
   try {
-    console.log("📦 /edd called with:", req.body);
-
     const { pincode } = req.body;
 
     if (!pincode) {
@@ -69,12 +55,12 @@ app.post("/edd", async (req, res) => {
       .slice(0, 10)
       .replace(/-/g, "");
 
-    console.log("🚚 Calling Blue Dart Transit Time API...");
+    console.log("🚚 Calling Blue Dart Transit Time API");
 
     const response = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/transit-time/v1/GetDomesticTransitTimeForPinCodeandProduct",
       {
-        pPinCodeFrom: "411022", // default origin pincode
+        pPinCodeFrom: "411022",
         pPinCodeTo: pincode,
         pProductCode: "A",
         pSubProductCode: "P",
@@ -88,8 +74,9 @@ app.post("/edd", async (req, res) => {
       },
       {
         headers: {
-          // 🔴 THIS IS THE CRITICAL FIX
+          // ✅ BOTH headers — this is the key
           JWTToken: token,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
           Accept: "application/json"
         }
@@ -101,12 +88,11 @@ app.post("/edd", async (req, res) => {
 
     console.log("✅ Blue Dart response:", result);
 
-    const edd = result?.ExpectedDateDelivery;
-
-    res.json({ edd });
+    res.json({
+      edd: result?.ExpectedDateDelivery
+    });
   } catch (error) {
-    console.error("❌ EDD ERROR FULL:", {
-      message: error.message,
+    console.error("❌ EDD ERROR:", {
       status: error.response?.status,
       data: error.response?.data
     });
@@ -123,8 +109,7 @@ app.get("/", (req, res) => {
   res.send("Blue Dart EDD server running");
 });
 
-// Render dynamic port
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 Server started on port", PORT);
+  console.log("🚀 Server running on port", PORT);
 });
