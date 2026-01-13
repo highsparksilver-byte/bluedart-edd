@@ -22,7 +22,8 @@ async function getToken() {
   }
 
   const res = await axios.post(
-    "https://apigateway-sandbox.bluedart.com/in/transportation/auth/v1/login",
+    ""https://apigateway-sandbox.bluedart.com/in/transportation/transit-time/v1/getDomesticTransitTimeForPinCodeandProduct"
+",
     { clientId: CLIENT_ID },
     { headers: { clientSecret: CLIENT_SECRET } }
   );
@@ -88,3 +89,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
