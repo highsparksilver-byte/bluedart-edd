@@ -6,33 +6,27 @@ app.use(express.json());
 
 /*
 ================================================
- 🧪 CLIENT-ID ONLY JWT EXPERIMENT
+ ✅ PRODUCTION MODE
+ ClientID-only JWT generation (CONFIRMED WORKING)
 ================================================
 */
 
-// 🔑 ClientID ONLY (no clientSecret anywhere)
+// 🔑 ClientID only
 const CLIENT_ID = "e8t8RyuHO1rNqZ6GCBsjRoqeokRoCefb";
 
-// 🔑 Hard-coded account credentials (same app)
+// 🔑 Account credentials (same app)
 const LOGIN_ID = "PNQ90609";
 const LICENCE_KEY = "oupkkkosmeqmuqqfsph8korrp8krmouj";
 
-// Cache JWT if one is returned
+// Cache JWT (refresh every 1 hour)
 let cachedJwt = null;
 let jwtFetchedAt = 0;
 
-/*
-================================================
- Attempt JWT generation with ONLY ClientID
-================================================
-*/
-async function getJwtClientIdOnly() {
-  // reuse token for 1 hour if received
+// Generate JWT using ONLY ClientID
+async function getJwt() {
   if (cachedJwt && Date.now() - jwtFetchedAt < 60 * 60 * 1000) {
     return cachedJwt;
   }
-
-  console.log("🔐 Trying JWT generation with ClientID ONLY");
 
   const res = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
@@ -40,44 +34,33 @@ async function getJwtClientIdOnly() {
       headers: {
         Accept: "application/json",
         ClientID: CLIENT_ID
-      },
-      validateStatus: () => true // capture all responses
+      }
     }
   );
 
-  console.log("🔎 Auth HTTP status:", res.status);
-  console.log("🔎 Auth response body:", res.data);
-
-  if (res.data && res.data.JWTToken) {
-    cachedJwt = res.data.JWTToken;
-    jwtFetchedAt = Date.now();
-    console.log("✅ JWT received via ClientID-only");
-    console.log("JWT length:", cachedJwt.length);
-    return cachedJwt;
+  if (!res.data?.JWTToken) {
+    throw new Error("JWT not returned by Blue Dart");
   }
 
-  throw new Error("JWT NOT returned from ClientID-only auth");
+  cachedJwt = res.data.JWTToken;
+  jwtFetchedAt = Date.now();
+  return cachedJwt;
 }
 
-/*
-================================================
- Helpers
-================================================
-*/
+// Legacy date format required by Transit API
 function legacyDateNow() {
   return `/Date(${Date.now()})/`;
 }
 
 /*
 ================================================
- EDD ENDPOINT (uses ClientID-only JWT)
+ EDD ENDPOINT
 ================================================
 */
 app.post("/edd", async (req, res) => {
   try {
     const destinationPincode = req.body.pincode || "400099";
-
-    const jwt = await getJwtClientIdOnly();
+    const jwt = await getJwt();
 
     const bdRes = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct",
@@ -99,40 +82,34 @@ app.post("/edd", async (req, res) => {
           JWTToken: jwt,
           "Content-Type": "application/json",
           Accept: "application/json"
-        },
-        validateStatus: () => true
+        }
       }
     );
 
+    const result =
+      bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult;
+
     res.json({
-      experiment: "client-id-only",
-      transitHttpStatus: bdRes.status,
-      transitResponse: bdRes.data
+      edd: result?.ExpectedDateDelivery
     });
 
   } catch (error) {
     res.status(500).json({
-      experiment: "client-id-only",
-      error: error.message
+      error: "EDD unavailable",
+      details: error.response?.data || error.message
     });
   }
 });
 
 /*
 ================================================
- Health Check
+ Health check
 ================================================
 */
 app.get("/", (_, res) => {
-  res.send("Blue Dart ClientID-only JWT experiment running");
+  res.send("Blue Dart EDD server running (ClientID-only JWT)");
 });
 
-/*
-================================================
- Start Server
-================================================
-*/
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🚀 Server running");
 });
