@@ -4,58 +4,26 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-/*
-================================================
- 🔐 Environment sanitiser (CRITICAL)
-================================================
-*/
-function cleanEnv(value) {
-  if (!value) return value;
-  return value
-    .replace(/\r/g, "")
-    .replace(/\n/g, "")
-    .replace(/\t/g, "")
-    .trim();
-}
+/* =========================
+   HEALTH CHECK (MANDATORY)
+========================= */
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
 
-/*
-================================================
- 🔑 Credentials from environment
-================================================
-*/
-const CLIENT_ID = cleanEnv(process.env.CLIENT_ID);
-const CLIENT_SECRET = cleanEnv(process.env.CLIENT_SECRET);
-const LOGIN_ID = cleanEnv(process.env.LOGIN_ID);
-const LICENCE_KEY = cleanEnv(process.env.LICENCE_KEY);
+/* =========================
+   CONFIG (ENV VARIABLES)
+========================= */
+const CLIENT_ID = process.env.BLUEDART_CLIENT_ID;
+const CLIENT_SECRET = process.env.BLUEDART_CLIENT_SECRET;
+const LOGIN_ID = process.env.BLUEDART_LOGIN_ID;
+const LICENCE_KEY = process.env.BLUEDART_LICENCE_KEY;
 
-// Startup verification
-console.log("🚀 Blue Dart EDD starting");
-console.log("CLIENT_ID present:", !!CLIENT_ID);
-console.log("CLIENT_SECRET present:", !!CLIENT_SECRET);
-console.log("LOGIN_ID present:", !!LOGIN_ID);
-console.log("LICENCE_KEY present:", !!LICENCE_KEY);
-
-if (!CLIENT_ID || !CLIENT_SECRET || !LOGIN_ID || !LICENCE_KEY) {
-  console.error("❌ Missing one or more required environment variables");
-}
-
-/*
-================================================
- 🔑 JWT cache (ClientID + Secret)
-================================================
-*/
-let cachedJwt = null;
-let jwtFetchedAt = 0;
-
-async function getJwt() {
-  // reuse JWT for 23 hours
-  if (cachedJwt && Date.now() - jwtFetchedAt < 23 * 60 * 60 * 1000) {
-    return cachedJwt;
-  }
-
-  console.log("🔐 Generating new JWT using ClientID + ClientSecret");
-
-  const res = await axios.get(
+/* =========================
+   GENERATE JWT TOKEN
+========================= */
+async function generateJWT() {
+  const response = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     {
       headers: {
@@ -66,92 +34,74 @@ async function getJwt() {
     }
   );
 
-  if (!res.data?.JWTToken) {
-    throw new Error("JWTToken not returned by authentication API");
-  }
-
-  cachedJwt = res.data.JWTToken;
-  jwtFetchedAt = Date.now();
-  return cachedJwt;
+  return response.data.JWTToken;
 }
 
-/*
-================================================
- Helpers
-================================================
-*/
-function legacyDateNow() {
-  return `/Date(${Date.now()})/`;
-}
-
-/*
-================================================
- EDD ENDPOINT
-================================================
-*/
+/* =========================
+   EDD ENDPOINT
+========================= */
 app.post("/edd", async (req, res) => {
   try {
-    const destinationPincode = req.body.pincode || "400099";
-    const jwt = await getJwt();
+    const { from_pincode, to_pincode } = req.body;
 
-    const bdRes = await axios.post(
+    if (!from_pincode || !to_pincode) {
+      return res.status(400).json({ error: "Missing pincode" });
+    }
+
+    // 1️⃣ Generate JWT
+    const jwtToken = await generateJWT();
+
+    // 2️⃣ Build Blue Dart request
+    const payload = {
+      pPinCodeFrom: from_pincode,
+      pPinCodeTo: to_pincode,
+      pProductCode: "A",
+      pSubProductCode: "P",
+      pPudate: `/Date(${Date.now()})/`,
+      pPickupTime: "16:00",
+      profile: {
+        Api_type: "S",
+        LicenceKey: LICENCE_KEY,
+        LoginID: LOGIN_ID
+      }
+    };
+
+    // 3️⃣ Call Blue Dart Transit API
+    const bdResponse = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct",
-      {
-        pPinCodeFrom: "411022",
-        pPinCodeTo: destinationPincode,
-        pProductCode: "A",
-        pSubProductCode: "P",
-        pPudate: legacyDateNow(),
-        pPickupTime: "16:00",
-        profile: {
-          Api_type: "S",
-          LicenceKey: LICENCE_KEY,
-          LoginID: LOGIN_ID
-        }
-      },
+      payload,
       {
         headers: {
-          JWTToken: jwt,
           "Content-Type": "application/json",
-          Accept: "application/json"
+          JWTToken: jwtToken
         }
       }
     );
 
-    res.json({
-      edd: bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult
-        ?.ExpectedDateDelivery
-    });
+    const result =
+      bdResponse.data?.GetDomesticTransitTimeForPinCodeandProductResult;
 
-  } catch (error) {
-    console.error("❌ EDD ERROR", {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message
-    });
+    if (!result || result.IsError) {
+      return res.status(500).json({ error: "EDD unavailable" });
+    }
 
-    res.status(500).json({
-      error: "EDD unavailable",
-      details: error.response?.data || error.message
+    // 4️⃣ Return ONLY the EDD (Shopify friendly)
+    return res.json({
+      edd: result.ExpectedDateDelivery
+    });
+  } catch (err) {
+    console.error("EDD ERROR:", err.response?.data || err.message);
+    return res.status(500).json({
+      error: "EDD unavailable"
     });
   }
 });
 
-/*
-================================================
- Health check
-================================================
-*/
-app.get("/", (_, res) => {
-  res.send("Blue Dart EDD server running (ClientID + Secret JWT)");
-});
-
-/*
-================================================
- Start server
-================================================
-*/
+/* =========================
+   START SERVER
+========================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
+  console.log(`Server running on port ${PORT}`);
 });
+``
