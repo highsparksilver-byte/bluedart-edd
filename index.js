@@ -6,21 +6,6 @@ app.use(express.json());
 
 /*
 ================================================
- 🌍 CORS FIX (REQUIRED FOR SHOPIFY)
-================================================
-*/
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, JWTToken");
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
-/*
-================================================
  🔐 Environment sanitiser (CRITICAL)
 ================================================
 */
@@ -43,32 +28,26 @@ const CLIENT_SECRET = cleanEnv(process.env.CLIENT_SECRET);
 const LOGIN_ID = cleanEnv(process.env.LOGIN_ID);
 const LICENCE_KEY = cleanEnv(process.env.LICENCE_KEY);
 
-// Startup verification
 console.log("🚀 Blue Dart EDD starting");
 console.log("CLIENT_ID present:", !!CLIENT_ID);
 console.log("CLIENT_SECRET present:", !!CLIENT_SECRET);
 console.log("LOGIN_ID present:", !!LOGIN_ID);
 console.log("LICENCE_KEY present:", !!LICENCE_KEY);
 
-if (!CLIENT_ID || !CLIENT_SECRET || !LOGIN_ID || !LICENCE_KEY) {
-  console.error("❌ Missing one or more required environment variables");
-}
-
 /*
 ================================================
- 🔑 JWT cache (ClientID + Secret)
+ 🔑 JWT cache (reuse for 23h)
 ================================================
 */
 let cachedJwt = null;
 let jwtFetchedAt = 0;
 
 async function getJwt() {
-  // reuse JWT for 23 hours
   if (cachedJwt && Date.now() - jwtFetchedAt < 23 * 60 * 60 * 1000) {
     return cachedJwt;
   }
 
-  console.log("🔐 Generating new JWT using ClientID + ClientSecret");
+  console.log("🔐 Generating new JWT");
 
   const res = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
@@ -82,7 +61,7 @@ async function getJwt() {
   );
 
   if (!res.data?.JWTToken) {
-    throw new Error("JWTToken not returned by authentication API");
+    throw new Error("JWTToken missing from authentication response");
   }
 
   cachedJwt = res.data.JWTToken;
@@ -101,21 +80,35 @@ function legacyDateNow() {
 
 /*
 ================================================
- HEALTH CHECK
+ ✅ HEALTH CHECK ENDPOINT
 ================================================
 */
 app.get("/health", (req, res) => {
-  res.send("OK");
+  res.status(200).send("OK");
 });
 
 /*
 ================================================
- EDD ENDPOINT (WORKING CONTRACT)
+ Root endpoint (optional)
+================================================
+*/
+app.get("/", (req, res) => {
+  res.send("Blue Dart EDD service running");
+});
+
+/*
+================================================
+ 🚚 EDD ENDPOINT (CORE LOGIC – UNCHANGED)
 ================================================
 */
 app.post("/edd", async (req, res) => {
   try {
-    const destinationPincode = req.body.pincode || "400099";
+    const destinationPincode = req.body.pincode;
+
+    if (!destinationPincode) {
+      return res.status(400).json({ error: "Missing pincode" });
+    }
+
     const jwt = await getJwt();
 
     const bdRes = await axios.post(
@@ -143,8 +136,9 @@ app.post("/edd", async (req, res) => {
     );
 
     res.json({
-      edd: bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult
-        ?.ExpectedDateDelivery
+      edd:
+        bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult
+          ?.ExpectedDateDelivery
     });
 
   } catch (error) {
@@ -163,16 +157,23 @@ app.post("/edd", async (req, res) => {
 
 /*
 ================================================
- Root
+ 🔁 KEEP RENDER SERVICE WARM
 ================================================
 */
-app.get("/", (_, res) => {
-  res.send("Blue Dart EDD server running");
-});
+const SELF_URL = "https://bluedart-edd.onrender.com/health";
+
+setInterval(async () => {
+  try {
+    await fetch(SELF_URL);
+    console.log("🔁 Keep-alive ping sent");
+  } catch (err) {
+    console.error("⚠️ Keep-alive ping failed");
+  }
+}, 5 * 60 * 1000); // every 5 minutes
 
 /*
 ================================================
- Start server
+ 🚀 Start server
 ================================================
 */
 const PORT = process.env.PORT || 3000;
