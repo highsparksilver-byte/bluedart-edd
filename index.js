@@ -1,7 +1,22 @@
 import express from "express";
 import axios from "axios";
+import cors from "cors";
 
 const app = express();
+
+/*
+================================================
+ ✅ CORS (CRITICAL FOR SHOPIFY)
+================================================
+*/
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"]
+  })
+);
+
 app.use(express.json());
 
 /*
@@ -148,7 +163,7 @@ app.post("/edd", async (req, res) => {
 
 /*
 ================================================
- 🔁 KEEP RENDER SERVICE WARM (FIXED)
+ 🔁 KEEP RENDER SERVICE WARM (SAFE)
 ================================================
 */
 const SELF_URL = "https://bluedart-edd.onrender.com/health";
@@ -157,7 +172,7 @@ setInterval(async () => {
   try {
     await axios.get(SELF_URL);
     console.log("🔁 Keep-alive ping sent");
-  } catch (err) {
+  } catch {
     console.error("⚠️ Keep-alive ping failed");
   }
 }, 5 * 60 * 1000);
