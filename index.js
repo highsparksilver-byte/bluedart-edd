@@ -43,16 +43,11 @@ const CLIENT_SECRET = cleanEnv(process.env.CLIENT_SECRET);
 const LOGIN_ID = cleanEnv(process.env.LOGIN_ID);
 const LICENCE_KEY = cleanEnv(process.env.LICENCE_KEY);
 
-// Startup verification
 console.log("🚀 Blue Dart EDD starting");
 console.log("CLIENT_ID present:", !!CLIENT_ID);
 console.log("CLIENT_SECRET present:", !!CLIENT_SECRET);
 console.log("LOGIN_ID present:", !!LOGIN_ID);
 console.log("LICENCE_KEY present:", !!LICENCE_KEY);
-
-if (!CLIENT_ID || !CLIENT_SECRET || !LOGIN_ID || !LICENCE_KEY) {
-  console.error("❌ Missing one or more required environment variables");
-}
 
 /*
 ================================================
@@ -63,12 +58,11 @@ let cachedJwt = null;
 let jwtFetchedAt = 0;
 
 async function getJwt() {
-  // reuse JWT for 23 hours
   if (cachedJwt && Date.now() - jwtFetchedAt < 23 * 60 * 60 * 1000) {
     return cachedJwt;
   }
 
-  console.log("🔐 Generating new JWT using ClientID + ClientSecret");
+  console.log("🔐 Generating new JWT");
 
   const res = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
@@ -101,7 +95,7 @@ function legacyDateNow() {
 
 /*
 ================================================
- HEALTH CHECK
+ HEALTH CHECK (USED FOR KEEP-ALIVE)
 ================================================
 */
 app.get("/health", (req, res) => {
@@ -110,7 +104,7 @@ app.get("/health", (req, res) => {
 
 /*
 ================================================
- EDD ENDPOINT (WORKING CONTRACT)
+ 🚚 EDD ENDPOINT (UNCHANGED & WORKING)
 ================================================
 */
 app.post("/edd", async (req, res) => {
@@ -143,8 +137,9 @@ app.post("/edd", async (req, res) => {
     );
 
     res.json({
-      edd: bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult
-        ?.ExpectedDateDelivery
+      edd:
+        bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult
+          ?.ExpectedDateDelivery
     });
 
   } catch (error) {
@@ -172,7 +167,20 @@ app.get("/", (_, res) => {
 
 /*
 ================================================
- Start server
+ 🔁 KEEP RENDER WARM (SAFE, NO SIDE EFFECTS)
+================================================
+*/
+const SELF_URL = "https://bluedart-edd.onrender.com/health";
+
+setInterval(() => {
+  fetch(SELF_URL)
+    .then(() => console.log("🔁 Keep-alive ping sent"))
+    .catch(() => console.log("⚠️ Keep-alive ping failed"));
+}, 5 * 60 * 1000); // every 5 minutes
+
+/*
+================================================
+ 🚀 Start server
 ================================================
 */
 const PORT = process.env.PORT || 3000;
