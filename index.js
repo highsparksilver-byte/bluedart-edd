@@ -159,7 +159,6 @@ console.log(JSON.stringify(bdRes.data, null, 2));
 });
 
 /*
-
 ================================================
  📦 TRACKING ENDPOINT (BLUEDART)
 ================================================
@@ -174,7 +173,7 @@ app.post("/track", async (req, res) => {
       });
     }
 
-    // 🔐 Reuse existing JWT logic
+    // 🔐 Reuse existing JWT logic (same as EDD)
     const jwt = await getJwt();
 
     // 🚚 Call Bluedart Tracking API
@@ -199,15 +198,27 @@ app.post("/track", async (req, res) => {
       }
     );
 
-    const result = bdRes.data?.ShipmentStatusResult;
+    // 🧠 IMPORTANT:
+    // Bluedart returns tracking data under DIFFERENT KEYS
+    // depending on environment & account.
+    const result =
+      bdRes.data?.ShipmentStatusResult ||
+      bdRes.data?.ShipmentStatusResponse?.Shipment ||
+      bdRes.data?.ShipmentStatusResponse ||
+      bdRes.data?.GetShipmentStatusResult;
 
-    if (!result || result.IsError === true) {
+    // ❌ No tracking available
+    if (
+      !result ||
+      result.IsError === true ||
+      result.ErrorMessage
+    ) {
       return res.status(404).json({
         error: "Tracking not available yet"
       });
     }
 
-    // 🧹 Clean response for frontend
+    // 🧹 Clean, frontend-safe response
     res.json({
       status: result.CurrentStatus || "Processing",
       last_location: result.CurrentLocation || "",
@@ -233,7 +244,6 @@ app.post("/track", async (req, res) => {
     });
   }
 });
-
 /*
 
 ================================================
@@ -267,6 +277,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
