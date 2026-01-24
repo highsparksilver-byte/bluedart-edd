@@ -41,7 +41,7 @@ function cleanEnv(value) {
 const CLIENT_ID = cleanEnv(process.env.CLIENT_ID);
 const CLIENT_SECRET = cleanEnv(process.env.CLIENT_SECRET);
 const LOGIN_ID = cleanEnv(process.env.LOGIN_ID);
-const LICENCE_KEY = cleanEnv(process.env.LICENCE_KEY);
+const LICENCE_KEY_EDD = cleanEnv(process.env.LICENCE_KEY);
 
 console.log("🚀 Blue Dart EDD starting");
 console.log("CLIENT_ID present:", !!CLIENT_ID);
@@ -123,7 +123,7 @@ app.post("/edd", async (req, res) => {
         pPickupTime: "16:00",
         profile: {
           Api_type: "S",
-          LicenceKey: LICENCE_KEY,
+          LicenceKey: LICENCE_KEY_EDD,
           LoginID: LOGIN_ID
         }
       },
@@ -187,3 +187,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
