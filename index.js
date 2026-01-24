@@ -47,7 +47,7 @@ console.log("🚀 Blue Dart EDD starting");
 console.log("CLIENT_ID present:", !!CLIENT_ID);
 console.log("CLIENT_SECRET present:", !!CLIENT_SECRET);
 console.log("LOGIN_ID present:", !!LOGIN_ID);
-console.log("LICENCE_KEY present:", !!LICENCE_KEY);
+console.log("LICENCE_KEY present:", !!LICENCE_KEY_EDD);
 
 /*
 ================================================
@@ -187,4 +187,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
