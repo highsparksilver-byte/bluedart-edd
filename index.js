@@ -160,7 +160,7 @@ console.log(JSON.stringify(bdRes.data, null, 2));
 
 /*
 ================================================
- 📦 TRACKING ENDPOINT (BLUEDART)
+ TRACKING ENDPOINT (BLUEDART)
 ================================================
 */
 app.post("/track", async (req, res) => {
@@ -173,10 +173,10 @@ app.post("/track", async (req, res) => {
       });
     }
 
-    // 🔐 Reuse existing JWT logic (same as EDD)
+    // Reuse existing JWT logic
     const jwt = await getJwt();
 
-    // 🚚 Call Bluedart Tracking API
+    // Call Bluedart Tracking API
     const bdRes = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/tracking/v1/ShipmentStatus",
       {
@@ -198,27 +198,19 @@ app.post("/track", async (req, res) => {
       }
     );
 
-    // 🧠 IMPORTANT:
-    // Bluedart returns tracking data under DIFFERENT KEYS
-    // depending on environment & account.
+    // Bluedart returns different keys depending on environment
     const result =
       bdRes.data?.ShipmentStatusResult ||
       bdRes.data?.ShipmentStatusResponse?.Shipment ||
       bdRes.data?.ShipmentStatusResponse ||
       bdRes.data?.GetShipmentStatusResult;
 
-    // ❌ No tracking available
-    if (
-      !result ||
-      result.IsError === true ||
-      result.ErrorMessage
-    ) {
+    if (!result || result.IsError === true || result.ErrorMessage) {
       return res.status(404).json({
         error: "Tracking not available yet"
       });
     }
 
-    // 🧹 Clean, frontend-safe response
     res.json({
       status: result.CurrentStatus || "Processing",
       last_location: result.CurrentLocation || "",
@@ -232,7 +224,7 @@ app.post("/track", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ TRACKING ERROR", {
+    console.error("TRACKING ERROR", {
       status: error.response?.status,
       data: error.response?.data,
       message: error.message
@@ -244,6 +236,7 @@ app.post("/track", async (req, res) => {
     });
   }
 });
+
 /*
 
 ================================================
@@ -277,6 +270,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
