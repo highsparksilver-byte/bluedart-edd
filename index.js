@@ -113,6 +113,8 @@ app.post("/edd", async (req, res) => {
     const jwt = await getJwt();
 
     const bdRes = await axios.post(
+     console.log("📦 RAW BLUEDART TRACKING RESPONSE");
+console.log(JSON.stringify(bdRes.data, null, 2));
       "https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct",
       {
         pPinCodeFrom: "411022",
@@ -265,6 +267,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
