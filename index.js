@@ -98,48 +98,51 @@ app.get("/health", (_, res) => {
  EDD ENDPOINT (FIXED)
 ================================================
 */
-app.post("/edd", async (req, res) => {
+app.post("/track", async (req, res) => {
   try {
-    const destinationPincode = req.body.pincode || "400099";
+    const { awb } = req.body;
+    if (!awb) {
+      return res.status(400).json({ error: "AWB required" });
+    }
+
     const jwt = await getJwt();
 
-    const bdRes = await axios.post(
-      "https://apigateway.bluedart.com/in/transportation/transit/v1/GetDomesticTransitTimeForPinCodeandProduct",
+    const response = await axios.post(
+      "https://apigateway.bluedart.com/in/transportation/tracking/v1/ShipmentStatus",
       {
-        pPinCodeFrom: "411022",
-        pPinCodeTo: destinationPincode,
-        pProductCode: "A",
-        pSubProductCode: "P",
-        pPudate: legacyDateNow(),
-        pPickupTime: "16:00",
-        profile: {
+        Request: {
+          AWBNo: awb
+        },
+        Profile: {
           Api_type: "S",
-          LicenceKey: LICENCE_KEY_EDD,
+          LicenceKey: "rotpvmgmoprrnkheoqhkltzi9oigzekn", // tracking license v1.3
           LoginID: LOGIN_ID
         }
       },
       {
         headers: {
           JWTToken: jwt,
-          "Content-Type": "application/json",
-          Accept: "application/json"
-        }
+          "Content-Type": "application/json"
+        },
+        responseType: "text"
       }
     );
 
+    // Return EXACT raw response
     res.json({
-      edd:
-        bdRes.data?.GetDomesticTransitTimeForPinCodeandProductResult
-          ?.ExpectedDateDelivery
+      api: "ShipmentStatus",
+      awb,
+      raw: response.data
     });
 
   } catch (error) {
     res.status(500).json({
-      error: "EDD unavailable",
+      error: "ShipmentStatus failed",
       details: error.response?.data || error.message
     });
   }
 });
+
 
 /*
 ================================================
@@ -221,6 +224,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
