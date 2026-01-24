@@ -143,7 +143,8 @@ app.post("/edd", async (req, res) => {
 
 /*
 ================================================
- TRACKING ENDPOINT (RAW XML DEBUG)
+ TRACKING ENDPOINT (HARDCODED TEST)
+ DO NOT USE IN PRODUCTION
 ================================================
 */
 app.post("/track", async (req, res) => {
@@ -155,14 +156,18 @@ app.post("/track", async (req, res) => {
 
     const jwt = await getJwt();
 
+    // 🔴 HARDCODED CREDENTIALS FOR TESTING
+    const TRACKING_LICENCE_KEY = "rotpvmgmoprrnkheoqhkltzi9oigzekn";
+    const TRACKING_LOGIN_ID = "PNQ90609";
+
     const bdRes = await axios.post(
       "https://apigateway.bluedart.com/in/transportation/tracking/v1/ShipmentStatus",
       {
         Request: { AWBNo: awb },
         Profile: {
           Api_type: "S",
-          LicenceKey: LICENCE_KEY_TRACKING,
-          LoginID: LOGIN_ID
+          LicenceKey: TRACKING_LICENCE_KEY,
+          LoginID: TRACKING_LOGIN_ID
         }
       },
       {
@@ -174,14 +179,15 @@ app.post("/track", async (req, res) => {
       }
     );
 
-    // TEMP: return raw XML exactly as received
+    // Return raw response for absolute clarity
     res.json({
-      raw_xml: bdRes.data
+      tracking_test: "hardcoded",
+      raw_response: bdRes.data
     });
 
   } catch (error) {
     res.status(500).json({
-      error: "Tracking unavailable",
+      error: "Tracking test failed",
       details: error.response?.data || error.message
     });
   }
@@ -215,6 +221,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
