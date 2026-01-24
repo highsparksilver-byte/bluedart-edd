@@ -159,7 +159,7 @@ app.post("/edd", async (req, res) => {
 /*
 
 ================================================
- 📦 TRACKING ENDPOINT (NEW)
+ 📦 TRACKING ENDPOINT (BLUEDART)
 ================================================
 */
 app.post("/track", async (req, res) => {
@@ -172,16 +172,62 @@ app.post("/track", async (req, res) => {
       });
     }
 
+    // 🔐 Reuse existing JWT logic
     const jwt = await getJwt();
 
+    // 🚚 Call Bluedart Tracking API
+    const bdRes = await axios.post(
+      "https://apigateway.bluedart.com/in/transportation/tracking/v1/ShipmentStatus",
+      {
+        Request: {
+          AWBNo: awb
+        },
+        Profile: {
+          Api_type: "S",
+          LicenceKey: LICENCE_KEY,
+          LoginID: LOGIN_ID
+        }
+      },
+      {
+        headers: {
+          JWTToken: jwt,
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        }
+      }
+    );
+
+    const result = bdRes.data?.ShipmentStatusResult;
+
+    if (!result || result.IsError === true) {
+      return res.status(404).json({
+        error: "Tracking not available yet"
+      });
+    }
+
+    // 🧹 Clean response for frontend
     res.json({
-      awb,
-      jwt_present: !!jwt
+      status: result.CurrentStatus || "Processing",
+      last_location: result.CurrentLocation || "",
+      last_update: result.StatusDateTime || "",
+      expected_delivery: result.ExpectedDeliveryDate || "",
+      history: (result.Scans || []).map(scan => ({
+        date: scan.ScanDateTime,
+        location: scan.ScanLocation,
+        description: scan.ScanDescription
+      }))
     });
 
   } catch (error) {
+    console.error("❌ TRACKING ERROR", {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
+    });
+
     res.status(500).json({
-      error: "Tracking failed"
+      error: "Tracking unavailable",
+      details: error.response?.data || error.message
     });
   }
 });
@@ -219,6 +265,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
