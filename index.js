@@ -157,6 +157,21 @@ app.post("/edd", async (req, res) => {
 });
 
 /*
+
+================================================
+ 📦 TRACKING ENDPOINT (NEW)
+================================================
+*/
+app.post("/track", async (req, res) => {
+  try {
+    res.json({ message: "Tracking endpoint alive" });
+  } catch (error) {
+    res.status(500).json({ error: "Tracking failed" });
+  }
+});
+
+/*
+
 ================================================
  Root
 ================================================
@@ -166,6 +181,7 @@ app.get("/", (_, res) => {
 });
 
 /*
+
 ================================================
  🔁 KEEP RENDER WARM (SAFE, NO SIDE EFFECTS)
 ================================================
@@ -187,3 +203,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
