@@ -22,37 +22,36 @@ app.use((req, res, next) => {
 
 /*
 ================================================
- 🔐 Environment sanitiser (CRITICAL)
+ 🔐 Environment sanitiser
 ================================================
 */
 function cleanEnv(value) {
   if (!value) return value;
-  return value
-    .replace(/\r/g, "")
-    .replace(/\n/g, "")
-    .replace(/\t/g, "")
-    .trim();
+  return value.replace(/\r|\n|\t/g, "").trim();
 }
 
 /*
 ================================================
- 🔑 Credentials from environment
+ 🔑 Credentials
 ================================================
 */
 const CLIENT_ID = cleanEnv(process.env.CLIENT_ID);
 const CLIENT_SECRET = cleanEnv(process.env.CLIENT_SECRET);
 const LOGIN_ID = cleanEnv(process.env.LOGIN_ID);
 const LICENCE_KEY = cleanEnv(process.env.LICENCE_KEY);
+const TRACKING_LICENCE_KEY =
+  cleanEnv(process.env.TRACKING_LICENCE_KEY) || LICENCE_KEY;
 
 console.log("🚀 Blue Dart Server starting");
 console.log("CLIENT_ID present:", !!CLIENT_ID);
 console.log("CLIENT_SECRET present:", !!CLIENT_SECRET);
 console.log("LOGIN_ID present:", !!LOGIN_ID);
 console.log("LICENCE_KEY present:", !!LICENCE_KEY);
+console.log("TRACKING_LICENCE_KEY present:", !!TRACKING_LICENCE_KEY);
 
 /*
 ================================================
- 🔑 JWT cache (ClientID + Secret)
+ 🔑 JWT cache (for EDD only)
 ================================================
 */
 let cachedJwt = null;
@@ -116,7 +115,7 @@ app.get("/health", (_, res) => {
 
 /*
 ================================================
- 🚚 EDD ENDPOINT (UNCHANGED)
+ 🚚 EDD (UNCHANGED & WORKING)
 ================================================
 */
 app.post("/edd", async (req, res) => {
@@ -154,8 +153,8 @@ app.post("/edd", async (req, res) => {
           ?.ExpectedDateDelivery
     });
 
-  } catch (error) {
-    console.error("❌ EDD ERROR", error.message);
+  } catch (err) {
+    console.error("❌ EDD ERROR:", err.message);
     res.status(500).json({ error: "EDD unavailable" });
   }
 });
@@ -168,10 +167,7 @@ app.post("/edd", async (req, res) => {
 app.post("/tracking", async (req, res) => {
   try {
     const { awb, scans = 0 } = req.body;
-
-    if (!awb) {
-      return res.status(400).json({ error: "AWB required" });
-    }
+    if (!awb) return res.status(400).json({ error: "AWB required" });
 
     const url =
       "https://api.bluedart.com/servlet/RoutingServlet" +
@@ -181,7 +177,7 @@ app.post("/tracking", async (req, res) => {
       "&awb=awb" +
       "&numbers=" + awb +
       "&format=xml" +
-      "&lickey=" + LICENCE_KEY +
+      "&lickey=" + TRACKING_LICENCE_KEY +
       "&verno=1" +
       "&scan=" + (scans ? 1 : 0);
 
@@ -214,7 +210,7 @@ app.post("/tracking", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ TRACKING ERROR", err.message);
+    console.error("❌ TRACKING ERROR:", err.message);
     res.status(500).json({ error: "Tracking unavailable" });
   }
 });
@@ -234,7 +230,6 @@ app.get("/", (_, res) => {
 ================================================
 */
 const SELF_URL = "https://bluedart-edd.onrender.com/health";
-
 setInterval(() => {
   fetch(SELF_URL).catch(() => {});
 }, 5 * 60 * 1000);
