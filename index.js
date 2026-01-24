@@ -166,17 +166,23 @@ app.post("/track", async (req, res) => {
   try {
     const { awb } = req.body;
 
-if (!awb) {
-  return res.status(400).json({
-    error: "AWB number required"
-  });
-}
+    if (!awb) {
+      return res.status(400).json({
+        error: "AWB number required"
+      });
+    }
 
-res.json({
-  received_awb: awb
-});
+    const jwt = await getJwt();
+
+    res.json({
+      awb,
+      jwt_present: !!jwt
+    });
+
   } catch (error) {
-    res.status(500).json({ error: "Tracking failed" });
+    res.status(500).json({
+      error: "Tracking failed"
+    });
   }
 });
 
@@ -213,5 +219,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
