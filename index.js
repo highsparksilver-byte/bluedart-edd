@@ -143,7 +143,7 @@ app.post("/edd", async (req, res) => {
 
 /*
 ================================================
- TRACKING ENDPOINT (FIXED)
+ TRACKING ENDPOINT (RAW XML DEBUG)
 ================================================
 */
 app.post("/track", async (req, res) => {
@@ -162,7 +162,7 @@ app.post("/track", async (req, res) => {
         Profile: {
           Api_type: "S",
           LicenceKey: LICENCE_KEY_TRACKING,
-          LoginID: LOGIN_ID   // ✅ FIX: use existing LOGIN_ID
+          LoginID: LOGIN_ID
         }
       },
       {
@@ -170,30 +170,13 @@ app.post("/track", async (req, res) => {
           JWTToken: jwt,
           "Content-Type": "application/json"
         },
-        responseType: "text" // force raw XML
+        responseType: "text"
       }
     );
 
-    const xml = bdRes.data;
-
-    // If Bluedart returned an error in XML
-    if (xml.includes("<Error>")) {
-      return res.status(404).json({
-        error: "Tracking not available yet"
-      });
-    }
-
-    // Very basic XML extraction
-    const extract = (tag) => {
-      const match = xml.match(new RegExp(`<${tag}>(.*?)</${tag}>`));
-      return match ? match[1] : "";
-    };
-
+    // TEMP: return raw XML exactly as received
     res.json({
-      status: extract("Status") || extract("CurrentStatus") || "Processing",
-      last_location: extract("Location") || extract("CurrentLocation"),
-      last_update: extract("StatusDate") || extract("StatusDateTime"),
-      expected_delivery: extract("ExpectedDelivery")
+      raw_xml: bdRes.data
     });
 
   } catch (error) {
@@ -232,5 +215,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
