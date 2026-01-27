@@ -25,7 +25,6 @@ const CLIENT_ID = clean(process.env.CLIENT_ID);
 const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
 const LOGIN_ID = clean(process.env.LOGIN_ID);
 
-// ⚠️ SEPARATE KEYS AS PER YOUR REQUEST
 const LICENCE_KEY_EDD = clean(process.env.BD_LICENCE_KEY_EDD);
 const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
 
@@ -139,7 +138,7 @@ function calculateConfidenceBand(eddStr) {
 }
 
 /* =================================================
-   🏙️ CITY LOOKUP (FREE API)
+   🏙️ CITY LOOKUP
 ================================================= */
 async function getCity(pincode) {
   try {
@@ -152,7 +151,7 @@ async function getCity(pincode) {
 }
 
 /* =================================================
-   ⚡ EXPRESS BADGE LOGIC (ROBUST VERSION)
+   ⚡ EXPRESS BADGE LOGIC
 ================================================= */
 function getExpressBadge(eddStr, city) {
   if (!eddStr) return "STANDARD";
@@ -160,11 +159,9 @@ function getExpressBadge(eddStr, city) {
   const minUTC = parseBlueDartDate(eddStr);
   if (!minUTC) return "STANDARD";
 
-  // Shift to IST
   const minIST = new Date(minUTC.getTime() + 5.5 * 60 * 60 * 1000);
   const todayIST = getIndiaDate();
 
-  // Normalize to pure dates
   const normalize = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const minDay = normalize(minIST);
   const todayDay = normalize(todayIST);
@@ -211,7 +208,6 @@ async function getBluedartEdd(pincode) {
         pSubProductCode: "P",
         pPudate: calculatePickupDate(),
         pPickupTime: "16:00",
-        // ⚠️ USES EDD KEY
         profile: { Api_type: "S", LicenceKey: LICENCE_KEY_EDD, LoginID: LOGIN_ID },
       },
       { headers: { JWTToken: jwt, "Content-Type": "application/json" } }
@@ -278,13 +274,11 @@ app.post("/edd", async (req, res) => {
 });
 
 /* =================================================
-   📦 TRACKING LOGIC
+   📦 TRACKING LOGIC (UPDATED & FIXED)
 ================================================= */
 async function trackBluedart(awb) {
   try {
-    // ⚠️ USES TRACKING KEY
     const url = "https://api.bluedart.com/servlet/RoutingServlet?handler=tnt&action=custawbquery&loginid=" + LOGIN_ID + "&awb=awb&numbers=" + awb + "&format=xml&lickey=" + LICENCE_KEY_TRACK + "&verno=1&scan=1";
-    
     const res = await axios.get(url, { responseType: "text", timeout: 8000 });
     const parsed = await new Promise((resolve, reject) => xml2js.parseString(res.data, { explicitArray: false }, (err, r) => err ? reject(err) : resolve(r)));
     const s = parsed?.ShipmentData?.Shipment;
@@ -315,11 +309,29 @@ async function trackShiprocket(awb) {
     const res = await axios.get(`https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`, { headers: { Authorization: `Bearer ${token}` }, timeout: 8000 });
     const t = res.data.tracking_data;
     if (!t) return null;
+
+    // ✅ FIX: Shiprocket output often puts details in 'shipment_track' array
+    const mainTrack = t.shipment_track && t.shipment_track[0] ? t.shipment_track[0] : {};
+
+    // 1. Fallback Logic for Fields
+    const rawStatus = t.current_status || mainTrack.current_status || "";
+    const courier = t.courier_name || mainTrack.courier_name || "Shiprocket";
+    const edd = t.estimated_delivery_date || mainTrack.edd || null;
+    
+    // 2. Determine Date (Delivered Date OR Status Date)
+    const statusDate = rawStatus.toUpperCase() === "DELIVERED" 
+      ? (mainTrack.delivered_date || t.shipment_track_activities?.[0]?.date) 
+      : (t.shipment_track_activities?.[0]?.date || mainTrack.pickup_date);
+
     return {
-      source: "shiprocket", courier: t.courier_name || "Shiprocket", status: t.current_status,
-      statusType: mapShiprocketStatus(t.current_status), expectedDelivery: t.estimated_delivery_date || null,
-      statusDate: t.shipment_track?.[0]?.date || null, statusTime: t.shipment_track?.[0]?.time || null,
-      scans: t.shipment_track || []
+      source: "shiprocket", 
+      courier: courier, 
+      status: rawStatus,
+      statusType: mapShiprocketStatus(rawStatus), 
+      expectedDelivery: edd,
+      statusDate: statusDate || null, 
+      statusTime: null,
+      scans: t.shipment_track_activities || t.shipment_track || []
     };
   } catch (e) { return null; }
 }
