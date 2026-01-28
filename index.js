@@ -20,7 +20,7 @@ const app = express();
 app.use(express.json());
 
 /* =================================================
-   🌍 CORS (SHOPIFY SAFE)
+   🌍 CORS
 ================================================= */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -30,16 +30,13 @@ app.use((req, res, next) => {
   next();
 });
 
-const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
-
 /* =================================================
-   🔑 CREDENTIALS & CONSTANTS
+   🔑 CONFIG
 ================================================= */
-const CLIENT_ID = clean(process.env.CLIENT_ID);
-const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
-const LOGIN_ID = clean(process.env.LOGIN_ID);
-
-const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const LOGIN_ID = process.env.LOGIN_ID;
+const LICENCE_KEY_TRACK = process.env.BD_LICENCE_KEY_TRACK;
 
 console.log("🚀 Server Starting...");
 console.log("📍 Warehouse: Pune (411022)");
@@ -95,11 +92,31 @@ async function trackBluedart(awb) {
 
     return {
       status: s.Status,
-      statusType: s.StatusType,
+      statusType: s.StatusType, // DL, UD, RT, etc
     };
   } catch {
     return null;
   }
+}
+
+/* =================================================
+   ⏱️ NEXT CHECK CALCULATOR (TRAFFIC LIGHT)
+================================================= */
+function calculateNextCheck(statusType) {
+  const now = new Date();
+
+  // 🔴 STOP FOREVER
+  if (statusType === "DL" || statusType === "RT") {
+    return new Date("9999-01-01");
+  }
+
+  // 🟢 FAST
+  if (statusType === "UD") {
+    return new Date(now.getTime() + 1 * 60 * 60 * 1000); // 1 hour
+  }
+
+  // 🟡 SLOW
+  return new Date(now.getTime() + 12 * 60 * 60 * 1000); // 12 hours
 }
 
 /* =================================================
@@ -113,7 +130,7 @@ app.get("/health", (_, res) => res.send("OK"));
 app.post("/_cron/sync", async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT id, awb, last_known_status
+      SELECT id, awb
       FROM shipments
       WHERE courier = 'bluedart'
         AND delivery_confirmed = false
@@ -122,17 +139,42 @@ app.post("/_cron/sync", async (req, res) => {
       LIMIT 25
     `);
 
-    console.log("🕒 Cron sync triggered");
-    console.log("📦 Due shipments:", rows.length);
+    console.log("🕒 Cron run | Due:", rows.length);
 
-    res.json({
-      ok: true,
-      due: rows.length,
-      awbs: rows.map((r) => r.awb),
-    });
+    for (const row of rows) {
+      const tracking = await trackBluedart(row.awb);
+      if (!tracking) continue;
+
+      const nextCheck = calculateNextCheck(tracking.statusType);
+
+      await pool.query(
+        `
+        UPDATE shipments
+        SET
+          last_known_status = $1,
+          last_checked_at = NOW(),
+          next_check_at = $2,
+          delivery_confirmed = $3,
+          delivered_at = CASE WHEN $3 = true THEN NOW() ELSE delivered_at END
+        WHERE id = $4
+        `,
+        [
+          tracking.status,
+          nextCheck,
+          tracking.statusType === "DL",
+          row.id,
+        ]
+      );
+
+      console.log(
+        `📦 ${row.awb} → ${tracking.statusType} | next check @ ${nextCheck.toISOString()}`
+      );
+    }
+
+    res.json({ ok: true, processed: rows.length });
   } catch (err) {
     console.error("❌ Cron sync failed");
-    console.error(err.message);
+    console.error(err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
