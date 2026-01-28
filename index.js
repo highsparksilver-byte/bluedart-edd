@@ -384,9 +384,10 @@ app.post("/_cron/sync", async (req, res) => {
 
     res.json({ ok: true, due: Number(rows[0].due) });
   } catch (err) {
-    console.error("❌ Cron sync failed:", err.message);
-    res.status(500).json({ ok: false });
-  }
+  console.error("❌ Cron sync failed");
+  console.error(err);
+  res.status(500).json({ ok: false, error: err.message });
+}
 });
 
 /* =================================================
