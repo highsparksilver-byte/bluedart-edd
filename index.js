@@ -20,7 +20,7 @@ const app = express();
 app.use(express.json());
 
 /* =================================================
-   🌍 CORS (SHOPIFY SAFE)
+   🌍 CORS (SAFE)
 ================================================= */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -31,17 +31,12 @@ app.use((req, res, next) => {
 });
 
 /* =================================================
-   🔑 ENV HELPERS
+   🔑 ENV
 ================================================= */
 const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
 
 const LOGIN_ID = clean(process.env.LOGIN_ID);
-const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
-
-/* =================================================
-   🩺 HEALTH
-================================================= */
-app.get("/health", (_, res) => res.send("OK"));
+const BD_LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
 
 /* =================================================
    📦 BLUE DART TRACKING
@@ -51,106 +46,121 @@ async function trackBluedart(awb) {
     const url =
       "https://api.bluedart.com/servlet/RoutingServlet" +
       `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
-      `&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
-
-    console.log("📡 Calling Blue Dart for", awb);
+      `&awb=awb&numbers=${awb}&format=xml&lickey=${BD_LICENCE_KEY_TRACK}` +
+      `&verno=1&scan=1`;
 
     const res = await axios.get(url, {
       responseType: "text",
-      timeout: 8000,
+      timeout: 15000,
     });
 
-console.log("📄 RAW BD XML:", res.data);
+    console.log("📄 RAW BD XML:", res.data);
 
     const parsed = await new Promise((resolve, reject) =>
       xml2js.parseString(
         res.data,
         { explicitArray: false },
-        (err, result) => (err ? reject(err) : resolve(result))
+        (err, r) => (err ? reject(err) : resolve(r))
       )
     );
 
-    const s = parsed?.ShipmentData?.Shipment;
-    if (!s || !s.StatusType) {
-      console.log("⚠️ Blue Dart response invalid for", awb);
-      return null;
-    }
-
-    console.log("✅ Blue Dart status for", awb, "→", s.StatusType);
+    const shipment = parsed?.ShipmentData?.Shipment;
+    if (!shipment || !shipment.StatusType) return null;
 
     return {
-      status: s.Status,
-      statusType: s.StatusType,
+      status: shipment.Status,
+      statusType: shipment.StatusType,
     };
   } catch (err) {
-    console.log("❌ Blue Dart API failed for", awb);
-    console.log(err.message);
+    console.error("❌ Blue Dart API failed for", awb);
+    console.error(err.message);
     return null;
   }
 }
 
 /* =================================================
-   ⏱️ CRON SYNC (PRIVATE)
+   ❤️ HEALTH
+================================================= */
+app.get("/health", (_, res) => res.send("OK"));
+
+/* =================================================
+   ⏱️ CRON SYNC (MANUAL / SCHEDULER)
 ================================================= */
 app.post("/_cron/sync", async (req, res) => {
-  let processed = 0;
+  console.log("🕒 Cron sync started");
 
   try {
-    console.log("🕒 Cron sync started");
-
     const { rows } = await pool.query(`
-      SELECT id, awb, last_known_status
+      SELECT id, awb
       FROM shipments
       WHERE courier = 'bluedart'
         AND delivery_confirmed = false
         AND next_check_at <= NOW()
       ORDER BY next_check_at ASC
-      LIMIT 25
+      LIMIT 10
     `);
 
     console.log("📦 DB rows fetched:", rows.length);
 
+    let processed = 0;
+
     for (const row of rows) {
-      console.log("➡️ Processing AWB:", row.awb);
+      console.log(`➡️ Processing AWB: ${row.awb}`);
 
       const tracking = await trackBluedart(row.awb);
 
       if (!tracking) {
-        console.log("⏭️ Skipping AWB (no tracking):", row.awb);
+        console.log(`⏭️ Skipping AWB (no tracking): ${row.awb}`);
         continue;
       }
 
-      const isDelivered = tracking.statusType === "DL";
+      console.log(
+        `✅ Blue Dart status for ${row.awb} → ${tracking.statusType}`
+      );
 
-      let nextCheck;
+      /* ===============================
+         🎉 DELIVERED (FINAL)
+      =============================== */
+      if (tracking.statusType === "DL") {
+        console.log(`🎉 Delivered: ${row.awb}`);
 
-      if (isDelivered) {
-        nextCheck = "9999-01-01";
-        console.log("🎉 Delivered:", row.awb);
-      } else {
-        nextCheck = "NOW() + INTERVAL '12 hours'";
-        console.log("🚚 In transit:", row.awb);
+        await pool.query(
+          `
+          UPDATE shipments
+          SET
+            delivery_confirmed = true,
+            last_known_status = $1,
+            last_checked_at = NOW(),
+            delivered_at = NOW(),
+            next_check_at = TIMESTAMP '9999-01-01'
+          WHERE id = $2
+          `,
+          [tracking.status, row.id]
+        );
+
+        processed++;
+        continue;
       }
 
+      /* ===============================
+         🚚 NOT FINAL → RESCHEDULE
+      =============================== */
       await pool.query(
         `
         UPDATE shipments
         SET
           last_known_status = $1,
           last_checked_at = NOW(),
-          next_check_at = ${nextCheck},
-          delivery_confirmed = $2,
-          delivered_at = CASE WHEN $2 = true THEN NOW() ELSE delivered_at END
-        WHERE awb = $3
+          next_check_at = NOW() + INTERVAL '12 hours'
+        WHERE id = $2
         `,
-        [tracking.status, isDelivered, row.awb]
+        [tracking.status, row.id]
       );
 
       processed++;
-      console.log("✅ Processed count incremented:", processed);
     }
 
-    console.log("🏁 Cron sync finished | Processed:", processed);
+    console.log(`🏁 Cron sync finished | Processed: ${processed}`);
 
     res.json({ ok: true, processed });
   } catch (err) {
@@ -161,7 +171,7 @@ app.post("/_cron/sync", async (req, res) => {
 });
 
 /* =================================================
-   🧠 KEEP-ALIVE (RENDER)
+   🧠 KEEP ALIVE (RENDER)
 ================================================= */
 const SELF_URL = process.env.RENDER_EXTERNAL_URL
   ? `${process.env.RENDER_EXTERNAL_URL}/health`
