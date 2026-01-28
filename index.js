@@ -36,80 +36,83 @@ app.use((req, res, next) => {
 const LOGIN_ID = process.env.LOGIN_ID;
 const LICENCE_KEY_TRACK = process.env.BD_LICENCE_KEY_TRACK;
 
-console.log("🚀 Ops Logistics starting (Phase 5.2 – Batched)");
+console.log("🚀 Ops Logistics starting (Phase 5.3)");
 
 /* =================================================
-   🧠 TRAFFIC LIGHT SCHEDULER
+   🧠 NEXT-CHECK CALCULATOR (TRAFFIC LIGHT)
 ================================================= */
 function calculateNextCheck(statusType) {
   const now = new Date();
 
+  // 🔴 STOP FOREVER
   if (statusType === "DL" || statusType === "RT") {
-    return new Date("9999-01-01T00:00:00Z");
+    return new Date("9999-01-01");
   }
 
+  // 🟢 FAST LANE
   if (statusType === "UD") {
-    return new Date(now.getTime() + 1 * 60 * 60 * 1000);
+    return new Date(now.getTime() + 1 * 60 * 60 * 1000); // +1 hour
   }
 
-  if (statusType === "IT" || statusType === "PU") {
-    return new Date(now.getTime() + 12 * 60 * 60 * 1000);
+  // 🟡 SLOW LANE
+  if (statusType === "IT") {
+    return new Date(now.getTime() + 12 * 60 * 60 * 1000); // +12 hours
   }
 
-  return new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  // ⚪ SAFETY
+  return new Date(now.getTime() + 24 * 60 * 60 * 1000); // +24 hours
 }
 
 /* =================================================
-   📦 BLUEDART — BATCH TRACKING
+   📦 BLUE DART — BATCH TRACKING
 ================================================= */
 async function trackBluedartBatch(awbs) {
-  if (!awbs.length) return {};
+  try {
+    const url =
+      "https://api.bluedart.com/servlet/RoutingServlet" +
+      `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
+      `&awb=awb&numbers=${awbs.join(",")}` +
+      `&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
 
-  const awbString = awbs.join(",");
+    console.log(`📡 Blue Dart batch call (${awbs.length} AWBs)`);
 
-  const url =
-    "https://api.bluedart.com/servlet/RoutingServlet" +
-    `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
-    `&awb=awb&numbers=${awbString}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
+    const res = await axios.get(url, {
+      responseType: "text",
+      timeout: 12000,
+    });
 
-  console.log(`📡 Blue Dart batch call (${awbs.length} AWBs)`);
+    console.log("📄 RAW BD XML (batch)");
 
-  const res = await axios.get(url, {
-    responseType: "text",
-    timeout: 15000,
-  });
+    const parsed = await new Promise((resolve, reject) =>
+      xml2js.parseString(
+        res.data,
+        { explicitArray: false },
+        (err, r) => (err ? reject(err) : resolve(r))
+      )
+    );
 
-  console.log(`📄 RAW BD XML (batch)`);
+    let shipments = parsed?.ShipmentData?.Shipment;
+    if (!shipments) return {};
 
-  const parsed = await new Promise((resolve, reject) =>
-    xml2js.parseString(res.data, { explicitArray: false }, (err, r) =>
-      err ? reject(err) : resolve(r)
-    )
-  );
+    if (!Array.isArray(shipments)) shipments = [shipments];
 
-  const shipments = parsed?.ShipmentData?.Shipment;
-  if (!shipments) return {};
+    const map = {};
+    for (const s of shipments) {
+      map[s.$.WaybillNo] = {
+        status: s.Status,
+        statusType: s.StatusType,
+      };
+    }
 
-  const list = Array.isArray(shipments) ? shipments : [shipments];
-
-  const result = {};
-  for (const s of list) {
-    result[s.$.WaybillNo] = {
-      status: s.Status,
-      statusType: s.StatusType,
-    };
+    return map;
+  } catch (err) {
+    console.error("❌ Blue Dart batch failed:", err.message);
+    return {};
   }
-
-  return result;
 }
 
 /* =================================================
-   ❤️ HEALTH
-================================================= */
-app.get("/health", (_, res) => res.send("OK"));
-
-/* =================================================
-   ⏱️ CRON SYNC (BATCHED)
+   ⏱️ CRON SYNC
 ================================================= */
 app.post("/_cron/sync", async (_, res) => {
   console.log("🕒 Cron sync started (batched)");
@@ -126,27 +129,27 @@ app.post("/_cron/sync", async (_, res) => {
     `);
 
     console.log(`📦 Due shipments: ${rows.length}`);
-
-    if (!rows.length) {
+    if (rows.length === 0) {
       return res.json({ ok: true, processed: 0 });
     }
 
     const awbs = rows.map(r => r.awb);
-    const trackingMap = await trackBluedartBatch(awbs);
+    const results = await trackBluedartBatch(awbs);
 
     let processed = 0;
 
     for (const row of rows) {
-      const tracking = trackingMap[row.awb];
-      if (!tracking) {
+      const data = results[row.awb];
+
+      if (!data) {
         console.log(`⏭️ No tracking for ${row.awb}`);
         continue;
       }
 
-      const { status, statusType } = tracking;
-      const nextCheck = calculateNextCheck(statusType);
+      const nextCheck = calculateNextCheck(data.statusType);
 
-      console.log(`✅ ${row.awb} → ${statusType}`);
+      console.log(`✅ ${row.awb} → ${data.statusType}`);
+      console.log(`🧠 Next check at: ${nextCheck.toISOString()}`);
 
       await pool.query(
         `
@@ -154,17 +157,16 @@ app.post("/_cron/sync", async (_, res) => {
         SET
           last_known_status = $1,
           last_checked_at = NOW(),
-          delivery_confirmed = $2,
-          delivered_at = CASE WHEN $2 = true THEN NOW() ELSE delivered_at END,
-          next_check_at = $3,
-          updated_at = NOW()
-        WHERE id = $4
+          next_check_at = $2,
+          delivery_confirmed = $3,
+          delivered_at = CASE WHEN $3 THEN NOW() ELSE delivered_at END
+        WHERE awb = $4
         `,
         [
-          status,
-          statusType === "DL" || statusType === "RT",
+          data.status,
           nextCheck,
-          row.id,
+          data.statusType === "DL" || data.statusType === "RT",
+          row.awb,
         ]
       );
 
@@ -173,17 +175,23 @@ app.post("/_cron/sync", async (_, res) => {
 
     console.log(`🏁 Cron finished | Processed: ${processed}`);
     res.json({ ok: true, processed });
+
   } catch (err) {
-    console.error("🔥 Cron failed");
+    console.error("🔥 Cron sync crashed");
     console.error(err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
 /* =================================================
-   🚀 START SERVER
+   ❤️ HEALTH
+================================================= */
+app.get("/health", (_, res) => res.send("OK"));
+
+/* =================================================
+   🚀 START
 ================================================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
+  console.log("🚀 Server running on port", PORT)
 );
