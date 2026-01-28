@@ -39,30 +39,16 @@ const CLIENT_ID = clean(process.env.CLIENT_ID);
 const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
 const LOGIN_ID = clean(process.env.LOGIN_ID);
 
-const LICENCE_KEY_EDD = clean(process.env.BD_LICENCE_KEY_EDD);
 const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
-
-const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
-const SR_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
 
 console.log("🚀 Server Starting...");
 console.log("📍 Warehouse: Pune (411022)");
 
-const HOLIDAYS = [
-  "2026-01-26",
-  "2026-03-03",
-  "2026-08-15",
-  "2026-10-02",
-  "2026-11-01",
-];
-
 /* =================================================
-   🔑 JWT CACHE
+   🔑 JWT CACHE (BLUEDART)
 ================================================= */
 let bdJwt = null;
 let bdJwtAt = 0;
-let srJwt = null;
-let srJwtAt = 0;
 
 async function getBluedartJwt() {
   if (bdJwt && Date.now() - bdJwtAt < 23 * 60 * 60 * 1000) return bdJwt;
@@ -83,25 +69,8 @@ async function getBluedartJwt() {
   return bdJwt;
 }
 
-async function getShiprocketJwt() {
-  if (!SR_EMAIL || !SR_PASSWORD) return null;
-  if (srJwt && Date.now() - srJwtAt < 8 * 24 * 60 * 60 * 1000) return srJwt;
-
-  try {
-    const res = await axios.post(
-      "https://apiv2.shiprocket.in/v1/external/auth/login",
-      { email: SR_EMAIL, password: SR_PASSWORD }
-    );
-    srJwt = res.data.token;
-    srJwtAt = Date.now();
-    return srJwt;
-  } catch {
-    return null;
-  }
-}
-
 /* =================================================
-   📦 TRACKING HELPERS
+   📦 TRACKING (BLUEDART)
 ================================================= */
 async function trackBluedart(awb) {
   try {
@@ -110,7 +79,10 @@ async function trackBluedart(awb) {
       `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
       `&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
 
-    const res = await axios.get(url, { responseType: "text", timeout: 8000 });
+    const res = await axios.get(url, {
+      responseType: "text",
+      timeout: 8000,
+    });
 
     const parsed = await new Promise((resolve, reject) =>
       xml2js.parseString(res.data, { explicitArray: false }, (err, r) =>
@@ -122,7 +94,6 @@ async function trackBluedart(awb) {
     if (!s || !s.Status) return null;
 
     return {
-      courier: "bluedart",
       status: s.Status,
       statusType: s.StatusType,
     };
@@ -132,7 +103,7 @@ async function trackBluedart(awb) {
 }
 
 /* =================================================
-   🛣️ ROUTES
+   ❤️ HEALTH
 ================================================= */
 app.get("/health", (_, res) => res.send("OK"));
 
@@ -183,6 +154,6 @@ if (SELF_URL) {
    🚀 START SERVER
 ================================================= */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log("🚀 Server running on port", PORT)
-);
+app.listen(PORT, () => {
+  console.log("🚀 Server running on port", PORT);
+});
