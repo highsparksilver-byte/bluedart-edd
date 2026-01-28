@@ -20,7 +20,7 @@ const app = express();
 app.use(express.json());
 
 /* =================================================
-   🌍 CORS (SAFE)
+   🌍 CORS
 ================================================= */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -31,36 +31,32 @@ app.use((req, res, next) => {
 });
 
 /* =================================================
-   🔑 ENV
+   🔑 CONFIG
 ================================================= */
-const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
+const LOGIN_ID = process.env.LOGIN_ID;
+const LICENCE_KEY_TRACK = process.env.BD_LICENCE_KEY_TRACK;
 
-const LOGIN_ID = clean(process.env.LOGIN_ID);
-const BD_LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
+console.log("🚀 Ops Logistics starting…");
 
 /* =================================================
-   📦 BLUE DART TRACKING
+   📦 BLUEDART TRACKING
 ================================================= */
 async function trackBluedart(awb) {
   try {
     const url =
       "https://api.bluedart.com/servlet/RoutingServlet" +
       `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
-      `&awb=awb&numbers=${awb}&format=xml&lickey=${BD_LICENCE_KEY_TRACK}` +
-      `&verno=1&scan=1`;
+      `&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
 
-    const res = await axios.get(url, {
-      responseType: "text",
-      timeout: 15000,
-    });
+    console.log(`📡 Calling Blue Dart for ${awb}`);
 
-    console.log("📄 RAW BD XML:", res.data);
+    const res = await axios.get(url, { responseType: "text", timeout: 10000 });
+
+    console.log(`📄 RAW BD XML for ${awb}:\n${res.data}`);
 
     const parsed = await new Promise((resolve, reject) =>
-      xml2js.parseString(
-        res.data,
-        { explicitArray: false },
-        (err, r) => (err ? reject(err) : resolve(r))
+      xml2js.parseString(res.data, { explicitArray: false }, (err, r) =>
+        err ? reject(err) : resolve(r)
       )
     );
 
@@ -72,10 +68,31 @@ async function trackBluedart(awb) {
       statusType: shipment.StatusType,
     };
   } catch (err) {
-    console.error("❌ Blue Dart API failed for", awb);
+    console.error(`❌ Blue Dart API failed for ${awb}`);
     console.error(err.message);
     return null;
   }
+}
+
+/* =================================================
+   🧠 TRAFFIC LIGHT SCHEDULER
+================================================= */
+function calculateNextCheck(statusType) {
+  const now = new Date();
+
+  if (statusType === "DL" || statusType === "RT") {
+    return new Date("9999-01-01T00:00:00Z");
+  }
+
+  if (statusType === "UD") {
+    return new Date(now.getTime() + 1 * 60 * 60 * 1000); // 1 hour
+  }
+
+  if (statusType === "IT" || statusType === "PU") {
+    return new Date(now.getTime() + 12 * 60 * 60 * 1000); // 12 hours
+  }
+
+  return new Date(now.getTime() + 24 * 60 * 60 * 1000); // fallback
 }
 
 /* =================================================
@@ -84,9 +101,9 @@ async function trackBluedart(awb) {
 app.get("/health", (_, res) => res.send("OK"));
 
 /* =================================================
-   ⏱️ CRON SYNC (MANUAL / SCHEDULER)
+   ⏱️ CRON SYNC
 ================================================= */
-app.post("/_cron/sync", async (req, res) => {
+app.post("/_cron/sync", async (_, res) => {
   console.log("🕒 Cron sync started");
 
   try {
@@ -97,64 +114,47 @@ app.post("/_cron/sync", async (req, res) => {
         AND delivery_confirmed = false
         AND next_check_at <= NOW()
       ORDER BY next_check_at ASC
-      LIMIT 10
+      LIMIT 25
     `);
 
-    console.log("📦 DB rows fetched:", rows.length);
+    console.log(`📦 DB rows fetched: ${rows.length}`);
 
     let processed = 0;
 
     for (const row of rows) {
-      console.log(`➡️ Processing AWB: ${row.awb}`);
+      const { id, awb } = row;
+      console.log(`➡️ Processing AWB: ${awb}`);
 
-      const tracking = await trackBluedart(row.awb);
-
+      const tracking = await trackBluedart(awb);
       if (!tracking) {
-        console.log(`⏭️ Skipping AWB (no tracking): ${row.awb}`);
+        console.log(`⏭️ Skipping AWB (no tracking): ${awb}`);
         continue;
       }
 
-      console.log(
-        `✅ Blue Dart status for ${row.awb} → ${tracking.statusType}`
-      );
+      const { status, statusType } = tracking;
+      const nextCheck = calculateNextCheck(statusType);
 
-      /* ===============================
-         🎉 DELIVERED (FINAL)
-      =============================== */
-      if (tracking.statusType === "DL") {
-        console.log(`🎉 Delivered: ${row.awb}`);
+      console.log(`✅ Status for ${awb}: ${statusType}`);
+      console.log(`⏭️ Next check at: ${nextCheck.toISOString()}`);
 
-        await pool.query(
-          `
-          UPDATE shipments
-          SET
-            delivery_confirmed = true,
-            last_known_status = $1,
-            last_checked_at = NOW(),
-            delivered_at = NOW(),
-            next_check_at = TIMESTAMP '9999-01-01'
-          WHERE id = $2
-          `,
-          [tracking.status, row.id]
-        );
-
-        processed++;
-        continue;
-      }
-
-      /* ===============================
-         🚚 NOT FINAL → RESCHEDULE
-      =============================== */
       await pool.query(
         `
         UPDATE shipments
         SET
           last_known_status = $1,
           last_checked_at = NOW(),
-          next_check_at = NOW() + INTERVAL '12 hours'
-        WHERE id = $2
+          delivery_confirmed = $2,
+          delivered_at = CASE WHEN $2 = true THEN NOW() ELSE delivered_at END,
+          next_check_at = $3,
+          updated_at = NOW()
+        WHERE id = $4
         `,
-        [tracking.status, row.id]
+        [
+          status,
+          statusType === "DL" || statusType === "RT",
+          nextCheck,
+          id,
+        ]
       );
 
       processed++;
@@ -171,22 +171,9 @@ app.post("/_cron/sync", async (req, res) => {
 });
 
 /* =================================================
-   🧠 KEEP ALIVE (RENDER)
-================================================= */
-const SELF_URL = process.env.RENDER_EXTERNAL_URL
-  ? `${process.env.RENDER_EXTERNAL_URL}/health`
-  : null;
-
-if (SELF_URL) {
-  setInterval(() => {
-    axios.get(SELF_URL).catch(() => {});
-  }, 10 * 60 * 1000);
-}
-
-/* =================================================
    🚀 START SERVER
 ================================================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
-  console.log("🚀 Server running on port", PORT)
+  console.log(`🚀 Server running on port ${PORT}`)
 );
