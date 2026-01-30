@@ -37,12 +37,19 @@ console.log("🚀 Ops Logistics running");
    CONSTANTS
 ========================= */
 const ORIGIN_PIN = "411022";
+
 const HOLIDAYS = [
   "2026-01-26",
   "2026-03-03",
   "2026-08-15",
   "2026-10-02",
   "2026-11-01",
+];
+
+const METROS = [
+  "MUMBAI","DELHI","NEW DELHI","NOIDA","GURGAON","GURUGRAM",
+  "BANGALORE","BENGALURU","PUNE","CHENNAI","HYDERABAD",
+  "KOLKATA","AHMEDABAD"
 ];
 
 /* =========================
@@ -56,13 +63,7 @@ async function getBluedartJwt() {
 
   const res = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
-    {
-      headers: {
-        Accept: "application/json",
-        ClientID: CLIENT_ID,
-        clientSecret: CLIENT_SECRET,
-      },
-    }
+    { headers: { Accept: "application/json", ClientID: CLIENT_ID, clientSecret: CLIENT_SECRET } }
   );
 
   bdJwt = res.data.JWTToken;
@@ -93,22 +94,11 @@ function isValidDate(d) {
 
 function parseBlueDartDate(str) {
   if (!str || typeof str !== "string") return null;
-
   const parts = str.split("-");
   if (parts.length !== 3) return null;
 
-  const months = {
-    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
-    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
-  };
-
-  const day = Number(parts[0]);
-  const month = months[parts[1]];
-  const year = Number(parts[2]);
-
-  if (!day || month === undefined || !year) return null;
-
-  const d = new Date(Date.UTC(year, month, day));
+  const months = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
+  const d = new Date(Date.UTC(Number(parts[2]), months[parts[1]], Number(parts[0])));
   return isValidDate(d) ? d : null;
 }
 
@@ -123,10 +113,7 @@ function confidenceBand(minDate) {
 
   let max = new Date(minDate);
   max.setUTCDate(max.getUTCDate() + 1);
-
-  while (isHoliday(max)) {
-    max.setUTCDate(max.getUTCDate() + 1);
-  }
+  while (isHoliday(max)) max.setUTCDate(max.getUTCDate() + 1);
 
   const fmt = (d) =>
     `${d.getUTCDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()]}`;
@@ -137,11 +124,32 @@ function confidenceBand(minDate) {
 }
 
 /* =========================
-   EDD CACHE
+   BADGE LOGIC
 ========================= */
-const eddCache = new Map();
-const cacheKey = (pin) =>
-  `${pin}-${new Date().toISOString().slice(0, 10)}`;
+function getBadge(minDate, city) {
+  if (!isValidDate(minDate)) return "STANDARD";
+
+  const today = new Date();
+  const diffDays = Math.round((minDate - today) / (1000 * 60 * 60 * 24));
+  const isMetro = METROS.some(m => (city || "").toUpperCase().includes(m));
+
+  if (isMetro && diffDays <= 2) return "METRO_EXPRESS";
+  if (diffDays <= 3) return "EXPRESS";
+  return "STANDARD";
+}
+
+/* =========================
+   CITY LOOKUP
+========================= */
+async function getCity(pin) {
+  try {
+    const res = await axios.get(`https://api.postalpincode.in/pincode/${pin}`, { timeout: 3000 });
+    if (res.data?.[0]?.Status === "Success") {
+      return res.data[0].PostOffice[0].District || res.data[0].PostOffice[0].Name;
+    }
+  } catch {}
+  return null;
+}
 
 /* =========================
    EDD SOURCES
@@ -179,8 +187,7 @@ async function getShiprocketEDD(pin) {
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
-    const etd = res.data?.data?.available_courier_companies?.[0]?.etd;
-    return etd || null;
+    return res.data?.data?.available_courier_companies?.[0]?.etd || null;
   } catch {
     return null;
   }
@@ -191,35 +198,31 @@ async function getShiprocketEDD(pin) {
 ========================= */
 app.post("/edd", async (req, res) => {
   const { pincode } = req.body;
-  if (!/^\d{6}$/.test(pincode)) {
-    return res.json({ edd_display: null });
+  if (!/^\d{6}$/.test(pincode)) return res.json({ edd_display: null });
+
+  let raw = await getBluedartEDD(pincode);
+  let min = parseBlueDartDate(raw);
+
+  if (!min) {
+    raw = await getShiprocketEDD(pincode);
+    min = isValidDate(new Date(raw)) ? new Date(raw) : null;
   }
 
-  const key = cacheKey(pincode);
-  if (eddCache.has(key)) return res.json(eddCache.get(key));
-
-  let rawEDD = await getBluedartEDD(pincode);
-  let minDate = parseBlueDartDate(rawEDD);
-
-  if (!minDate) {
-    rawEDD = await getShiprocketEDD(pincode);
-    minDate = isValidDate(new Date(rawEDD)) ? new Date(rawEDD) : null;
-  }
-
-  if (!minDate) {
+  if (!min) {
     return res.json({
       edd_display: null,
       message: "Delivery timeline will be confirmed after order placement",
     });
   }
 
-  const response = {
-    edd_display: confidenceBand(minDate),
-    cached: false,
-  };
+  const city = await getCity(pincode);
+  const badge = getBadge(min, city);
 
-  eddCache.set(key, { ...response, cached: true });
-  res.json(response);
+  res.json({
+    edd_display: confidenceBand(min),
+    city,
+    badge,
+  });
 });
 
 /* =========================
