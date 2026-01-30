@@ -1,7 +1,6 @@
 import express from "express";
-import axios from "axios";
-import xml2js from "xml2js";
 import crypto from "crypto";
+import axios from "axios";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -21,53 +20,33 @@ const app = express();
 app.use(express.json());
 
 /* =================================================
-   🌍 CORS (SHOPIFY SAFE)
+   🔑 ENV
 ================================================= */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-/* =================================================
-   🔑 ENV HELPERS
-================================================= */
-const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
-
-/* =================================================
-   🔑 CREDENTIALS
-================================================= */
-const CLIENT_ID = clean(process.env.CLIENT_ID);
-const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
-const LOGIN_ID = clean(process.env.LOGIN_ID);
-
-const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
-
 const {
+  PORT = 3000,
+  APP_URL,
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
   SHOPIFY_SCOPES,
-  SHOPIFY_API_VERSION,
-  APP_URL
+  SHOPIFY_API_VERSION
 } = process.env;
-
-console.log("🚀 Ops Logistics starting…");
 
 /* =================================================
    ❤️ HEALTH
 ================================================= */
-app.get("/health", (_, res) => res.send("OK"));
+app.get("/", (_, res) => {
+  res.send("Ops Logistics Sync running ✅");
+});
 
 /* =================================================
-   🔐 PHASE 6.2 — SHOPIFY AUTH START
+   🔐 PHASE 6 — SHOPIFY AUTH START
 ================================================= */
 app.get("/auth/shopify", (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).send("Missing shop");
 
   const state = crypto.randomBytes(16).toString("hex");
+
   const redirectUri = `${APP_URL}/auth/shopify/callback`;
 
   const installUrl =
@@ -77,12 +56,12 @@ app.get("/auth/shopify", (req, res) => {
     `&redirect_uri=${redirectUri}` +
     `&state=${state}`;
 
-  console.log("➡️ Shopify install:", shop);
+  console.log("➡️ Redirecting to Shopify:", installUrl);
   res.redirect(installUrl);
 });
 
 /* =================================================
-   🔐 PHASE 6.3 — SHOPIFY CALLBACK + SAVE TOKEN
+   🔐 PHASE 6 — SHOPIFY CALLBACK
 ================================================= */
 app.get("/auth/shopify/callback", async (req, res) => {
   try {
@@ -91,20 +70,21 @@ app.get("/auth/shopify/callback", async (req, res) => {
       return res.status(400).send("Missing OAuth params");
     }
 
-    /* ---- HMAC VERIFY ---- */
-    const q = { ...req.query };
-    delete q.hmac;
-    delete q.signature;
+    /* ---- HMAC VALIDATION ---- */
+    const query = { ...req.query };
+    delete query.hmac;
+    delete query.signature;
 
-    const msg = new URLSearchParams(q).toString();
-    const hash = crypto
+    const message = new URLSearchParams(query).toString();
+
+    const generatedHmac = crypto
       .createHmac("sha256", SHOPIFY_CLIENT_SECRET)
-      .update(msg)
+      .update(message)
       .digest("hex");
 
-    if (hash !== hmac) {
-      console.error("❌ Shopify HMAC failed");
-      return res.status(401).send("HMAC validation failed");
+    if (generatedHmac !== hmac) {
+      console.error("❌ HMAC failed");
+      return res.status(401).send("Invalid HMAC");
     }
 
     /* ---- TOKEN EXCHANGE ---- */
@@ -117,124 +97,97 @@ app.get("/auth/shopify/callback", async (req, res) => {
       }
     );
 
-    const accessToken = tokenRes.data.access_token;
+    const { access_token } = tokenRes.data;
 
-    /* ---- SAVE TO NEON ---- */
+    /* ---- SAVE SHOP TOKEN ---- */
     await pool.query(
       `
-      INSERT INTO shopify_shops (shop_domain, access_token)
+      INSERT INTO shopify_shops (shop, access_token)
       VALUES ($1, $2)
-      ON CONFLICT (shop_domain)
+      ON CONFLICT (shop)
       DO UPDATE SET access_token = EXCLUDED.access_token
       `,
-      [shop, accessToken]
+      [shop, access_token]
     );
 
-    console.log("✅ Shopify token saved for", shop);
+    console.log("✅ Shopify connected:", shop);
 
     res.send(`
-      <h2>✅ App Installed Successfully</h2>
-      <p>Shop: ${shop}</p>
+      <h2>✅ App Installed</h2>
+      <p>${shop}</p>
       <p>You can close this window.</p>
     `);
-
   } catch (err) {
-    console.error("❌ OAuth error:", err.response?.data || err.message);
+    console.error("❌ OAuth error:", err.message);
     res.status(500).send("OAuth failed");
   }
 });
 
 /* =================================================
-   📦 BLUEDART TRACK (SINGLE)
+   🔄 PHASE 7.1 — SHOPIFY → SHIPMENTS SYNC
 ================================================= */
-async function trackBluedart(awb) {
+app.post("/_cron/shopify-sync", async (_, res) => {
   try {
-    const url =
-      `https://api.bluedart.com/servlet/RoutingServlet` +
-      `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
-      `&awb=awb&numbers=${awb}&format=xml` +
-      `&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
-
-    const res = await axios.get(url, {
-      responseType: "text",
-      timeout: 10000
-    });
-
-    const parsed = await new Promise((resolve, reject) =>
-      xml2js.parseString(res.data, { explicitArray: false }, (e, r) =>
-        e ? reject(e) : resolve(r)
-      )
+    const { rows: shops } = await pool.query(
+      `SELECT shop, access_token FROM shopify_shops`
     );
 
-    const s = parsed?.ShipmentData?.Shipment;
-    if (!s || !s.StatusType) return null;
+    let total = 0;
 
-    return {
-      status: s.Status,
-      statusType: s.StatusType
-    };
+    for (const { shop, access_token } of shops) {
+      const ordersRes = await axios.get(
+        `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders.json?status=any&limit=50`,
+        { headers: { "X-Shopify-Access-Token": access_token } }
+      );
 
-  } catch {
-    return null;
-  }
-}
+      for (const order of ordersRes.data.orders) {
+        const customer = order.customer || {};
+        const phone = customer.phone || order.phone || null;
+        const email = customer.email || null;
 
-/* =================================================
-   ⏱️ CRON — SHIPMENT SYNC
-================================================= */
-app.post("/_cron/sync", async (req, res) => {
-  try {
-    console.log("🕒 Cron sync started");
+        for (const f of order.fulfillments || []) {
+          if (!f.tracking_number) continue;
 
-    const { rows } = await pool.query(`
-      SELECT id, awb
-      FROM shipments
-      WHERE courier = 'bluedart'
-        AND delivery_confirmed = false
-        AND next_check_at <= NOW()
-      LIMIT 25
-    `);
+          await pool.query(
+            `
+            INSERT INTO shipments (
+              shopify_order_id,
+              shopify_order_name,
+              fulfillment_id,
+              awb,
+              courier,
+              customer_mobile,
+              customer_email,
+              delivery_confirmed,
+              created_at,
+              updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,false,NOW(),NOW())
+            ON CONFLICT (awb) DO UPDATE SET
+              customer_mobile = EXCLUDED.customer_mobile,
+              customer_email = EXCLUDED.customer_email,
+              updated_at = NOW()
+            `,
+            [
+              order.id.toString(),
+              order.name,
+              f.id.toString(),
+              f.tracking_number,
+              (f.tracking_company || "").toLowerCase(),
+              phone,
+              email
+            ]
+          );
 
-    let processed = 0;
-
-    for (const r of rows) {
-      const t = await trackBluedart(r.awb);
-      if (!t) continue;
-
-      if (t.statusType === "DL") {
-        await pool.query(
-          `
-          UPDATE shipments
-          SET delivery_confirmed = true,
-              last_known_status = 'Delivered',
-              delivered_at = NOW(),
-              last_checked_at = NOW(),
-              next_check_at = '9999-01-01'
-          WHERE id = $1
-          `,
-          [r.id]
-        );
-      } else {
-        await pool.query(
-          `
-          UPDATE shipments
-          SET last_known_status = $1,
-              last_checked_at = NOW(),
-              next_check_at = NOW() + INTERVAL '6 hours'
-          WHERE id = $2
-          `,
-          [t.status, r.id]
-        );
+          total++;
+        }
       }
-
-      processed++;
     }
 
-    console.log("🏁 Cron done | Processed:", processed);
-    res.json({ ok: true, processed });
-
-  } catch (e) {
-    console.error("❌ Cron failed:", e.message);
+    console.log("🔄 Shopify sync complete:", total);
+    res.json({ ok: true, synced: total });
+  } catch (err) {
+    console.error("❌ Shopify sync failed:", err.message);
     res.status(500).json({ ok: false });
   }
 });
@@ -244,14 +197,15 @@ app.post("/_cron/sync", async (req, res) => {
 ================================================= */
 if (process.env.RENDER_EXTERNAL_URL) {
   setInterval(() => {
-    axios.get(`${process.env.RENDER_EXTERNAL_URL}/health`).catch(() => {});
+    axios
+      .get(`${process.env.RENDER_EXTERNAL_URL}/`)
+      .catch(() => {});
   }, 10 * 60 * 1000);
 }
 
 /* =================================================
-   🚀 START
+   🚀 START SERVER
 ================================================= */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log("🚀 Ops Logistics running on port", PORT)
-);
+app.listen(PORT, () => {
+  console.log("🚀 Ops Logistics running on port", PORT);
+});
