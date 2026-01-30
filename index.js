@@ -16,27 +16,51 @@ const pool = new Pool({
 });
 
 /* ===============================
-   🔑 ENV
+   🌍 CORS
 ================================ */
-const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
-
-const LOGIN_ID = clean(process.env.LOGIN_ID);
-const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
-const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
-const SR_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 console.log("🚀 Ops Logistics running");
 
 /* ===============================
-   🔐 JWT CACHE
+   🔑 ENV
 ================================ */
-let srJwt = null;
-let srJwtAt = 0;
+const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
+
+const CLIENT_ID = clean(process.env.CLIENT_ID);
+const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
+const LOGIN_ID = clean(process.env.LOGIN_ID);
+const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
+
+const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
+const SR_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
+
+/* ===============================
+   🔐 TOKEN CACHE
+================================ */
+let bdJwt = null, bdJwtAt = 0;
+let srJwt = null, srJwtAt = 0;
+
+async function getBluedartJwt() {
+  if (bdJwt && Date.now() - bdJwtAt < 23 * 60 * 60 * 1000) return bdJwt;
+  const r = await axios.get(
+    "https://apigateway.bluedart.com/in/transportation/token/v1/login",
+    { headers: { Accept: "application/json", ClientID: CLIENT_ID, clientSecret: CLIENT_SECRET } }
+  );
+  bdJwt = r.data.JWTToken;
+  bdJwtAt = Date.now();
+  return bdJwt;
+}
 
 async function getShiprocketJwt() {
   if (!SR_EMAIL || !SR_PASSWORD) return null;
-  if (srJwt && Date.now() - srJwtAt < 7 * 24 * 60 * 60 * 1000) return srJwt;
-
+  if (srJwt && Date.now() - srJwtAt < 8 * 24 * 60 * 60 * 1000) return srJwt;
   const r = await axios.post(
     "https://apiv2.shiprocket.in/v1/external/auth/login",
     { email: SR_EMAIL, password: SR_PASSWORD }
@@ -49,27 +73,22 @@ async function getShiprocketJwt() {
 /* ===============================
    🕒 TIME HELPERS
 ================================ */
-function istNow() {
+function nowIST() {
   const n = new Date();
   return new Date(n.getTime() + (330 + n.getTimezoneOffset()) * 60000);
 }
 
-function nextDay8am() {
-  const d = istNow();
-  d.setDate(d.getDate() + 1);
-  d.setHours(8, 0, 0, 0);
-  return d;
-}
-
 /* ===============================
-   🚚 TRACKERS
+   🚚 TRACKING FETCHERS
 ================================ */
 async function trackBluedart(awb) {
   try {
-    const url = `https://api.bluedart.com/servlet/RoutingServlet?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
+    const url =
+      `https://api.bluedart.com/servlet/RoutingServlet` +
+      `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
+      `&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
 
     const r = await axios.get(url, { responseType: "text", timeout: 8000 });
-
     const parsed = await new Promise((res, rej) =>
       xml2js.parseString(r.data, { explicitArray: false }, (e, o) => e ? rej(e) : res(o))
     );
@@ -80,10 +99,8 @@ async function trackBluedart(awb) {
     return {
       source: "bluedart",
       actual_courier: "Blue Dart",
-      status: s.Status || "IN TRANSIT",
-      delivered: s.StatusType === "DL",
-      ndr_reason: null,
-      scans: Array.isArray(s.Scans?.ScanDetail) ? s.Scans.ScanDetail : []
+      status: s.Status || "",
+      scans: s.Scans?.ScanDetail || []
     };
   } catch {
     return null;
@@ -100,21 +117,14 @@ async function trackShiprocket(awb) {
       { headers: { Authorization: `Bearer ${t}` }, timeout: 8000 }
     );
 
-    const td = r.data.tracking_data;
-    const last = td?.shipment_track?.[0];
-
-    const normalizedStatus =
-      last?.["sr-status-label"] ||
-      td?.current_status ||
-      "IN TRANSIT";
+    const td = r.data?.tracking_data;
+    if (!td) return null;
 
     return {
       source: "shiprocket",
-      actual_courier: td?.courier_name || null,
-      status: normalizedStatus,
-      delivered: normalizedStatus.toUpperCase().includes("DELIVERED"),
-      ndr_reason: last?.activity || null,
-      scans: td?.shipment_track || []
+      actual_courier: td.courier_name || null,
+      status: td.current_status || "",
+      scans: td.shipment_track_activities || []
     };
   } catch {
     return null;
@@ -122,106 +132,111 @@ async function trackShiprocket(awb) {
 }
 
 /* ===============================
-   🧠 OPS LOGIC (HARDENED)
+   🧠 OPS LOGIC (SAFE)
 ================================ */
-function computeNextCheck(status) {
-  const s = (status || "IN TRANSIT").toUpperCase();
+function detectOpsFlag(status, createdAt) {
+  if (!status) return null;
 
-  if (s.includes("DELIVERED")) return new Date("9999-01-01");
-  if (s.includes("OUT FOR")) return new Date(Date.now() + 60 * 60 * 1000);
-  if (s.includes("NDR") || s.includes("FAILED")) return nextDay8am();
-  if (s.includes("INVALID") || s.includes("INCORRECT")) return new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const s = status.toUpperCase();
+  const hours = (Date.now() - new Date(createdAt).getTime()) / 36e5;
 
-  return new Date(Date.now() + 6 * 60 * 60 * 1000);
-}
-
-function detectOpsFlag(row, status) {
-  const s = (status || "IN TRANSIT").toUpperCase();
-  const now = istNow();
-  const created = row.created_at ? new Date(row.created_at) : now;
-  const hours = (now - created) / 36e5;
-
-  const slaDays = row.tracking_source === "shiprocket" ? 5 : 4;
-
-  if (!s.includes("DELIVERED") && hours > slaDays * 24) {
-    return "SLA_BREACH";
-  }
-
-  if (row.last_known_status === status && row.last_checked_at) {
-    const h = (now - new Date(row.last_checked_at)) / 36e5;
-    if (h > 48) return "STUCK_IN_TRANSIT";
-  }
+  if (s.includes("DELIVERED")) return null;
+  if (s.includes("NDR") || s.includes("FAILED")) return "NDR_ATTENTION";
+  if (hours > 96) return "SLA_BREACH";
 
   return null;
 }
 
-/* ===============================
-   💾 PERSIST (UPDATE ONLY)
-================================ */
-async function persistTracking(awb, data) {
-  const { rows } = await pool.query(
-    "SELECT * FROM shipments WHERE awb = $1",
-    [awb]
-  );
-  if (!rows.length) return;
+function computeNextCheck(status) {
+  const now = nowIST();
+  const s = (status || "").toUpperCase();
 
-  const row = rows[0];
-  const opsFlag = detectOpsFlag(row, data.status);
-  const nextCheck = computeNextCheck(data.status);
+  if (s.includes("DELIVERED")) return new Date("9999-01-01");
 
-  await pool.query(`
-    UPDATE shipments SET
-      last_known_status = $1,
-      actual_courier = COALESCE($2, actual_courier),
-      delivered_at = CASE WHEN $3 THEN NOW() ELSE delivered_at END,
-      next_check_at = $4,
-      ops_flag = $5,
-      ndr_reason = $6,
-      last_checked_at = NOW(),
-      updated_at = NOW()
-    WHERE awb = $7
-  `, [
-    data.status,
-    data.actual_courier,
-    data.delivered,
-    nextCheck,
-    opsFlag,
-    data.ndr_reason,
-    awb
-  ]);
+  if (s.includes("OUT FOR")) {
+    now.setHours(now.getHours() + 1);
+    return now;
+  }
+
+  if (s.includes("NDR") || s.includes("FAILED")) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 1);
+    d.setHours(8, 0, 0, 0);
+    return d;
+  }
+
+  now.setHours(now.getHours() + 24);
+  return now;
 }
 
 /* ===============================
-   🌐 ROUTES
+   💾 UPSERT TRACKING
+================================ */
+async function persistTracking(awb, data) {
+  const status = data.status || "";
+  const opsFlag = detectOpsFlag(status, new Date());
+  const deliveredAt = status.toUpperCase().includes("DELIVERED") ? nowIST() : null;
+  const nextCheck = computeNextCheck(status);
+
+  await pool.query(
+    `
+    INSERT INTO shipments (
+      awb, tracking_source, actual_courier,
+      last_known_status, delivered_at,
+      next_check_at, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,NOW())
+    ON CONFLICT (awb)
+    DO UPDATE SET
+      tracking_source = EXCLUDED.tracking_source,
+      actual_courier = EXCLUDED.actual_courier,
+      last_known_status = EXCLUDED.last_known_status,
+      delivered_at = COALESCE(shipments.delivered_at, EXCLUDED.delivered_at),
+      next_check_at = EXCLUDED.next_check_at,
+      updated_at = NOW()
+    `,
+    [
+      awb,
+      data.source,
+      data.actual_courier,
+      status,
+      deliveredAt,
+      nextCheck
+    ]
+  );
+}
+
+/* ===============================
+   📡 TRACK API
 ================================ */
 app.get("/track", async (req, res) => {
   const { awb } = req.query;
   if (!awb) return res.status(400).json({ error: "AWB required" });
 
-  const data = await trackBluedart(awb) || await trackShiprocket(awb);
+  let data = await trackBluedart(awb);
+  if (!data) data = await trackShiprocket(awb);
+
   if (!data) return res.status(404).json({ error: "Tracking not found" });
 
   await persistTracking(awb, data);
   res.json(data);
 });
 
-app.post("/_cron/track/run", async (_, res) => {
-  const { rows } = await pool.query(`
-    SELECT awb FROM shipments
-    WHERE next_check_at <= NOW()
-    LIMIT 30
-  `);
+/* ===============================
+   🧑‍💼 OPS DASHBOARD (9.4)
+================================ */
+app.get("/ops/dashboard", async (_, res) => {
+  const [attention, ndr, ofd] = await Promise.all([
+    pool.query("SELECT * FROM ops_attention LIMIT 100"),
+    pool.query("SELECT * FROM ops_ndr LIMIT 100"),
+    pool.query("SELECT * FROM ops_ofd LIMIT 100")
+  ]);
 
-  let processed = 0;
-  for (const r of rows) {
-    const d = await trackBluedart(r.awb) || await trackShiprocket(r.awb);
-    if (d) {
-      await persistTracking(r.awb, d);
-      processed++;
-    }
-  }
-
-  res.json({ ok: true, processed });
+  res.json({
+    attention: attention.rows,
+    ndr: ndr.rows,
+    out_for_delivery: ofd.rows
+  });
 });
 
 /* ===============================
