@@ -1,12 +1,26 @@
 import express from "express";
 import axios from "axios";
 import xml2js from "xml2js";
+import pg from "pg";
 
+const { Pool } = pg;
+
+/* =================================================
+   🗄️ DATABASE
+================================================= */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+/* =================================================
+   🚀 APP INIT
+================================================= */
 const app = express();
 app.use(express.json());
 
 /* =================================================
-   🌍 CORS (SHOPIFY SAFE)
+   🌍 CORS
 ================================================= */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -19,7 +33,7 @@ app.use((req, res, next) => {
 const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
 
 /* =================================================
-   🔑 CREDENTIALS
+   🔑 ENV
 ================================================= */
 const CLIENT_ID = clean(process.env.CLIENT_ID);
 const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
@@ -31,11 +45,8 @@ const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
 const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
 const SR_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
 
-console.log("🚀 Ops Logistics starting...");
-console.log("📍 Warehouse: Pune (411022)");
-
 /* =================================================
-   📅 HOLIDAYS
+   📅 CONSTANTS
 ================================================= */
 const HOLIDAYS = [
   "2026-01-26",
@@ -56,7 +67,7 @@ let srJwtAt = 0;
 async function getBluedartJwt() {
   if (bdJwt && Date.now() - bdJwtAt < 23 * 60 * 60 * 1000) return bdJwt;
 
-  const res = await axios.get(
+  const r = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     {
       headers: {
@@ -67,7 +78,7 @@ async function getBluedartJwt() {
     }
   );
 
-  bdJwt = res.data.JWTToken;
+  bdJwt = r.data.JWTToken;
   bdJwtAt = Date.now();
   return bdJwt;
 }
@@ -76,132 +87,56 @@ async function getShiprocketJwt() {
   if (!SR_EMAIL || !SR_PASSWORD) return null;
   if (srJwt && Date.now() - srJwtAt < 8 * 24 * 60 * 60 * 1000) return srJwt;
 
-  try {
-    const res = await axios.post(
-      "https://apiv2.shiprocket.in/v1/external/auth/login",
-      { email: SR_EMAIL, password: SR_PASSWORD }
-    );
-    srJwt = res.data.token;
-    srJwtAt = Date.now();
-    return srJwt;
-  } catch {
-    return null;
-  }
+  const r = await axios.post(
+    "https://apiv2.shiprocket.in/v1/external/auth/login",
+    { email: SR_EMAIL, password: SR_PASSWORD }
+  );
+
+  srJwt = r.data.token;
+  srJwtAt = Date.now();
+  return srJwt;
 }
 
 /* =================================================
    🇮🇳 DATE HELPERS
 ================================================= */
 function getIndiaDate() {
-  const now = new Date();
-  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-  return new Date(utc + 5.5 * 60 * 60 * 1000);
+  const n = new Date();
+  return new Date(n.getTime() + (330 + n.getTimezoneOffset()) * 60000);
 }
 
 function isNonWorkingDay(d) {
-  const day = d.getDay();
-  const ymd = d.toISOString().slice(0, 10);
-  return day === 0 || HOLIDAYS.includes(ymd);
+  return d.getDay() === 0 || HOLIDAYS.includes(d.toISOString().slice(0, 10));
 }
 
 function calculatePickupDate() {
-  const now = getIndiaDate();
-  let d = new Date(now);
-
-  if (now.getHours() > 11 || (now.getHours() === 11 && now.getMinutes() >= 45)) {
+  let d = getIndiaDate();
+  if (d.getHours() > 11 || (d.getHours() === 11 && d.getMinutes() >= 45)) {
     d.setDate(d.getDate() + 1);
   }
-
-  while (isNonWorkingDay(d)) {
-    d.setDate(d.getDate() + 1);
-  }
-
+  while (isNonWorkingDay(d)) d.setDate(d.getDate() + 1);
   return `/Date(${d.getTime()})/`;
 }
 
 /* =================================================
-   📦 EDD HELPERS
-================================================= */
-function parseBlueDartDate(str) {
-  if (!str) return null;
-  const [dd, mon, yyyy] = str.split("-");
-  const months = {
-    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
-  };
-  return new Date(Date.UTC(yyyy, months[mon.toLowerCase()], dd));
-}
-
-function calculateConfidenceBand(eddStr) {
-  const min = parseBlueDartDate(eddStr);
-  if (!min) return null;
-
-  let max = new Date(min);
-  max.setUTCDate(max.getUTCDate() + 1);
-
-  while (isNonWorkingDay(max)) {
-    max.setUTCDate(max.getUTCDate() + 1);
-  }
-
-  const fmt = (d) =>
-    `${d.getUTCDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()]}`;
-
-  return min.getUTCMonth() === max.getUTCMonth()
-    ? `${min.getUTCDate()}–${fmt(max)}`
-    : `${fmt(min)} – ${fmt(max)}`;
-}
-
-/* =================================================
-   🛡️ EDD RATE LIMIT (LIGHT)
-================================================= */
-const eddRateMap = new Map();
-
-function allowEdd(ip) {
-  const now = Date.now();
-  const limit = 20;
-  const windowMs = 60 * 60 * 1000;
-
-  const e = eddRateMap.get(ip) || { count: 0, ts: now };
-
-  if (now - e.ts > windowMs) {
-    e.count = 0;
-    e.ts = now;
-  }
-
-  e.count++;
-  eddRateMap.set(ip, e);
-
-  return e.count <= limit;
-}
-
-/* =================================================
-   🧠 DAILY EDD CACHE
+   🧠 EDD CACHE (DAILY)
 ================================================= */
 const eddCache = new Map();
 
+function eddKey(pincode) {
+  return `${pincode}-${getIndiaDate().toISOString().slice(0, 10)}`;
+}
+
 /* =================================================
-   🛣️ EDD ROUTE
+   📦 EDD ROUTE
 ================================================= */
 app.post("/edd", async (req, res) => {
-  const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-
-  if (!allowEdd(ip)) {
-    return res.status(429).json({ error: "Too many requests" });
-  }
-
-  let { pincode } = req.body;
-  pincode = String(pincode || "").trim();
-
-  if (!/^[1-9][0-9]{5}$/.test(pincode)) {
+  const pincode = String(req.body.pincode || "").trim();
+  if (!/^[1-9][0-9]{5}$/.test(pincode))
     return res.status(400).json({ error: "Invalid pincode" });
-  }
 
-  const today = getIndiaDate().toISOString().slice(0, 10);
-  const key = `${pincode}-${today}`;
-
-  if (eddCache.has(key)) {
-    return res.json({ ...eddCache.get(key), cached: true });
-  }
+  const key = eddKey(pincode);
+  if (eddCache.has(key)) return res.json({ ...eddCache.get(key), cached: true });
 
   let edd = null;
 
@@ -220,7 +155,6 @@ app.post("/edd", async (req, res) => {
       },
       { headers: { JWTToken: jwt } }
     );
-
     edd =
       r.data?.GetDomesticTransitTimeForPinCodeandProductResult
         ?.ExpectedDateDelivery || null;
@@ -229,26 +163,105 @@ app.post("/edd", async (req, res) => {
   if (!edd) {
     try {
       const token = await getShiprocketJwt();
-      if (token) {
-        const sr = await axios.get(
-          `https://apiv2.shiprocket.in/v1/external/courier/serviceability/?pickup_postcode=411022&delivery_postcode=${pincode}&cod=1&weight=0.5`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-
-        const c = sr.data?.data?.available_courier_companies;
-        if (c?.length) edd = c[0].etd;
-      }
+      const sr = await axios.get(
+        `https://apiv2.shiprocket.in/v1/external/courier/serviceability/?pickup_postcode=411022&delivery_postcode=${pincode}&cod=1&weight=0.5`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      edd = sr.data?.data?.available_courier_companies?.[0]?.etd || null;
     } catch {}
   }
 
-  const response = {
-    edd: edd || null,
-    edd_display: edd ? calculateConfidenceBand(edd) : null,
-    badge: edd ? "STANDARD" : null,
-  };
-
+  const response = { edd: edd || null };
   if (edd) eddCache.set(key, response);
   res.json(response);
+});
+
+/* =================================================
+   📦 TRACKING (BD + SHIPROCKET)
+================================================= */
+async function trackBluedart(awb) {
+  try {
+    const url =
+      `https://api.bluedart.com/servlet/RoutingServlet?handler=tnt` +
+      `&action=custawbquery&loginid=${LOGIN_ID}` +
+      `&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
+
+    const r = await axios.get(url, { responseType: "text", timeout: 8000 });
+    const parsed = await xml2js.parseStringPromise(r.data, {
+      explicitArray: false,
+    });
+
+    const s = parsed?.ShipmentData?.Shipment;
+    if (!s) return null;
+
+    return {
+      status: s.Status,
+      statusType: s.StatusType,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function trackShiprocket(awb) {
+  try {
+    const token = await getShiprocketJwt();
+    const r = await axios.get(
+      `https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    return {
+      status: r.data.tracking_data.current_status,
+      statusType: r.data.tracking_data.current_status_code,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* =================================================
+   ⏱️ CRON SYNC
+================================================= */
+app.post("/_cron/sync", async (_, res) => {
+  const { rows } = await pool.query(`
+    SELECT id, awb, courier
+    FROM shipments
+    WHERE delivery_confirmed = false
+      AND next_check_at <= NOW()
+    LIMIT 25
+  `);
+
+  let processed = 0;
+
+  for (const r of rows) {
+    const data =
+      r.courier === "bluedart"
+        ? await trackBluedart(r.awb)
+        : await trackShiprocket(r.awb);
+
+    if (!data) continue;
+
+    const delivered = data.statusType === "DL";
+    const next =
+      delivered ? "9999-01-01" : new Date(Date.now() + 12 * 60 * 60 * 1000);
+
+    await pool.query(
+      `
+      UPDATE shipments
+      SET last_known_status=$1,
+          delivery_confirmed=$2,
+          last_checked_at=NOW(),
+          next_check_at=$3
+      WHERE id=$4
+    `,
+      [data.status, delivered, next, r.id]
+    );
+
+    processed++;
+  }
+
+  res.json({ ok: true, processed });
 });
 
 /* =================================================
