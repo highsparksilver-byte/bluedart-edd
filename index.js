@@ -1,6 +1,4 @@
 import express from "express";
-import axios from "axios";
-import xml2js from "xml2js";
 import pg from "pg";
 
 /* ===============================
@@ -40,8 +38,11 @@ app.get("/ops/dashboard", async (_req, res) => {
         last_known_status,
         delivered_at,
         first_ndr_at,
-        next_check_at
+        next_check_at,
+        ops_note,
+        ops_resolved_at
       FROM shipments
+      WHERE ops_resolved_at IS NULL
     `);
 
     const now = new Date();
@@ -55,35 +56,15 @@ app.get("/ops/dashboard", async (_req, res) => {
       const delivered = !!r.delivered_at;
 
       if (!delivered && r.next_check_at && new Date(r.next_check_at) < now) {
-        attention.push({
-          awb: r.awb,
-          courier: r.actual_courier,
-          status: r.last_known_status,
-          next_check_at: r.next_check_at
-        });
+        attention.push(r);
       }
 
-      if (
-        !delivered &&
-        (status.includes("NDR") || r.first_ndr_at)
-      ) {
-        ndr.push({
-          awb: r.awb,
-          courier: r.actual_courier,
-          status: r.last_known_status,
-          first_ndr_at: r.first_ndr_at
-        });
+      if (!delivered && (status.includes("NDR") || r.first_ndr_at)) {
+        ndr.push(r);
       }
 
-      if (
-        !delivered &&
-        status.includes("OUT FOR DELIVERY")
-      ) {
-        outForDelivery.push({
-          awb: r.awb,
-          courier: r.actual_courier,
-          status: r.last_known_status
-        });
+      if (!delivered && status.includes("OUT FOR DELIVERY")) {
+        outForDelivery.push(r);
       }
     }
 
@@ -95,6 +76,52 @@ app.get("/ops/dashboard", async (_req, res) => {
   } catch (err) {
     console.error("OPS DASHBOARD ERROR", err);
     res.status(500).json({ error: "ops_dashboard_failed" });
+  }
+});
+
+/* ===============================
+   ✍️ OPS NOTE (ADD / UPDATE)
+================================ */
+app.post("/ops/note", async (req, res) => {
+  const { awb, note } = req.body;
+
+  if (!awb || !note) {
+    return res.status(400).json({ error: "awb_and_note_required" });
+  }
+
+  try {
+    await pool.query(
+      `UPDATE shipments SET ops_note=$1, updated_at=NOW() WHERE awb=$2`,
+      [note, awb]
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("OPS NOTE ERROR", err);
+    res.status(500).json({ error: "ops_note_failed" });
+  }
+});
+
+/* ===============================
+   ✅ OPS RESOLVE
+================================ */
+app.post("/ops/resolve", async (req, res) => {
+  const { awb } = req.body;
+
+  if (!awb) {
+    return res.status(400).json({ error: "awb_required" });
+  }
+
+  try {
+    await pool.query(
+      `UPDATE shipments SET ops_resolved_at=NOW(), updated_at=NOW() WHERE awb=$1`,
+      [awb]
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("OPS RESOLVE ERROR", err);
+    res.status(500).json({ error: "ops_resolve_failed" });
   }
 });
 
