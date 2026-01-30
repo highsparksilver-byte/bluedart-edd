@@ -30,18 +30,10 @@ app.use((req, res, next) => {
    🔑 ENV
 ================================ */
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+
 if (!SHOPIFY_WEBHOOK_SECRET) {
   console.error("❌ SHOPIFY_WEBHOOK_SECRET missing");
 }
-
-/* ===============================
-   🗄️ DB
-================================ */
-const { Pool } = pg;
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
 
 /* ===============================
    🔐 HMAC VERIFY
@@ -62,28 +54,58 @@ function verifyShopifyWebhook(req) {
 }
 
 /* ===============================
-   📦 WEBHOOK: ORDER PAID
+   💰 WEBHOOK: ORDER PAID
 ================================ */
-app.post("/webhooks/orders-paid", async (req, res) => {
-  try {
-    if (!verifyShopifyWebhook(req)) {
-      console.warn("❌ Invalid webhook signature");
-      return res.status(401).json({ error: "invalid_signature" });
-    }
-
-    const order = req.body;
-    console.log("✅ Order paid webhook:", order.name);
-
-    // IMPORTANT:
-    // We DO NOT insert shipments here.
-    // Shopify remains the source of truth.
-    // This webhook is only for OPS awareness / future linking.
-
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("Webhook error:", err);
-    res.status(500).json({ error: "webhook_failed" });
+app.post("/webhooks/orders-paid", (req, res) => {
+  if (!verifyShopifyWebhook(req)) {
+    console.warn("❌ Invalid ORDER PAID webhook signature");
+    return res.status(401).end();
   }
+
+  const order = req.body;
+  console.log("💰 ORDER PAID");
+  console.log("Order:", order.name);
+  console.log("Payment:", order.financial_status);
+
+  res.json({ ok: true });
+});
+
+/* ===============================
+   📦 WEBHOOK: FULFILLMENT CREATED
+================================ */
+app.post("/webhooks/fulfillment-created", (req, res) => {
+  if (!verifyShopifyWebhook(req)) {
+    console.warn("❌ Invalid FULFILLMENT webhook signature");
+    return res.status(401).end();
+  }
+
+  const f = req.body;
+
+  console.log("📦 FULFILLMENT CREATED");
+  console.log("Order ID:", f.order_id);
+  console.log("Fulfillment ID:", f.id);
+  console.log("Courier:", f.tracking_company);
+  console.log("AWB:", f.tracking_number);
+
+  res.json({ ok: true });
+});
+
+/* ===============================
+   ❌ WEBHOOK: ORDER CANCELLED
+================================ */
+app.post("/webhooks/orders-cancelled", (req, res) => {
+  if (!verifyShopifyWebhook(req)) {
+    console.warn("❌ Invalid CANCEL webhook signature");
+    return res.status(401).end();
+  }
+
+  const order = req.body;
+
+  console.log("❌ ORDER CANCELLED");
+  console.log("Order:", order.name);
+  console.log("Reason:", order.cancel_reason);
+
+  res.json({ ok: true });
 });
 
 /* ===============================
