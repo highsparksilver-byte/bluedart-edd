@@ -5,30 +5,13 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-/* =================================================
-   🗄️ DATABASE (NEON)
-================================================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-/* =================================================
-   🚀 APP INIT
-================================================= */
 const app = express();
 app.use(express.json());
-
-/* =================================================
-   🌍 CORS
-================================================= */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
 
 /* =================================================
    🔑 ENV
@@ -38,8 +21,6 @@ const {
   SHOPIFY_CLIENT_SECRET,
   SHOPIFY_API_VERSION,
   SHOPIFY_SCOPES,
-  SHOPIFY_SHOP,
-  SHOPIFY_ACCESS_TOKEN,
   APP_URL
 } = process.env;
 
@@ -56,7 +37,6 @@ app.get("/auth/shopify", (req, res) => {
   if (!shop) return res.status(400).send("Missing shop");
 
   const state = crypto.randomBytes(16).toString("hex");
-
   const redirectUri = `${APP_URL}/auth/shopify/callback`;
 
   const installUrl =
@@ -66,32 +46,28 @@ app.get("/auth/shopify", (req, res) => {
     `&redirect_uri=${redirectUri}` +
     `&state=${state}`;
 
-  console.log("➡️ Shopify install:", installUrl);
   res.redirect(installUrl);
 });
 
 /* =================================================
-   🔐 SHOPIFY CALLBACK
+   🔐 SHOPIFY CALLBACK (SAVE TOKEN)
 ================================================= */
 app.get("/auth/shopify/callback", async (req, res) => {
   try {
     const { shop, code, hmac } = req.query;
-    if (!shop || !code || !hmac) return res.status(400).send("Missing params");
 
     const query = { ...req.query };
     delete query.hmac;
     delete query.signature;
 
     const message = new URLSearchParams(query).toString();
-
     const generatedHmac = crypto
       .createHmac("sha256", SHOPIFY_CLIENT_SECRET)
       .update(message)
       .digest("hex");
 
     if (generatedHmac !== hmac) {
-      console.error("❌ HMAC FAILED");
-      return res.status(401).send("HMAC failed");
+      return res.status(401).send("HMAC validation failed");
     }
 
     const tokenRes = await axios.post(
@@ -103,41 +79,58 @@ app.get("/auth/shopify/callback", async (req, res) => {
       }
     );
 
-    console.log("✅ Shopify token received");
+    const { access_token } = tokenRes.data;
 
-    res.send("App installed successfully. You may close this tab.");
+    // ✅ SAVE TOKEN
+    await pool.query(
+      `
+      INSERT INTO shopify_shops (shop_domain, access_token)
+      VALUES ($1, $2)
+      ON CONFLICT (shop_domain)
+      DO UPDATE SET access_token = EXCLUDED.access_token
+      `,
+      [shop, access_token]
+    );
+
+    res.send("✅ App installed successfully. You may close this tab.");
+
   } catch (err) {
-    console.error("❌ OAuth error", err.response?.data || err.message);
+    console.error("OAuth failed", err.message);
     res.status(500).send("OAuth failed");
   }
 });
 
 /* =================================================
-   🕒 CRON — SHOPIFY ORDER SYNC (DEBUG ONLY)
+   🕒 CRON — SHOPIFY SYNC (FIXED)
 ================================================= */
 app.post("/_cron/shopify/sync-orders", async (req, res) => {
   try {
-    console.log("🔍 SHOPIFY DEBUG");
-    console.log("SHOP:", SHOPIFY_SHOP);
-    console.log("API VERSION:", SHOPIFY_API_VERSION);
-    console.log("TOKEN PRESENT:", !!SHOPIFY_ACCESS_TOKEN);
+    const { rows } = await pool.query(
+      `SELECT shop_domain, access_token FROM shopify_shops LIMIT 1`
+    );
 
-    const url = `https://${SHOPIFY_SHOP}/admin/api/${SHOPIFY_API_VERSION}/orders.json?status=any&limit=1`;
+    if (rows.length === 0) {
+      return res.status(400).json({ error: "No shop installed" });
+    }
+
+    const { shop_domain, access_token } = rows[0];
+
+    const url = `https://${shop_domain}/admin/api/${SHOPIFY_API_VERSION}/orders.json?status=any&limit=5`;
 
     const response = await axios.get(url, {
       headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        "X-Shopify-Access-Token": access_token
       }
     });
 
-    console.log("✅ Shopify API reachable");
-
-    res.json({ ok: true, sample: response.data.orders?.length || 0 });
+    res.json({
+      ok: true,
+      orders_fetched: response.data.orders.length
+    });
 
   } catch (err) {
-    console.error("❌ Shopify sync failed");
-    console.error(err.response?.status, err.response?.data || err.message);
-    res.status(500).json({ ok: false, error: err.message });
+    console.error("❌ Shopify sync failed", err.response?.data || err.message);
+    res.status(500).json({ ok: false });
   }
 });
 
