@@ -5,20 +5,22 @@ import pg from "pg";
 const app = express();
 
 /* ===============================
-   RAW BODY FOR SHOPIFY HMAC
+   RAW BODY (SHOPIFY HMAC)
 ================================ */
-app.use(express.json({
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
-  }
-}));
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
 
 /* ===============================
    CORS
 ================================ */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
@@ -27,21 +29,18 @@ app.use((req, res, next) => {
 /* ===============================
    ENV
 ================================ */
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-
-/* ===============================
-   DB
-================================ */
 const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+
 /* ===============================
-   SHOPIFY HMAC VERIFY
+   HMAC VERIFY
 ================================ */
-function verifyShopifyWebhook(req) {
+function verifyShopify(req) {
   const hmac = req.get("X-Shopify-Hmac-Sha256");
   if (!hmac || !req.rawBody) return false;
 
@@ -50,111 +49,92 @@ function verifyShopifyWebhook(req) {
     .update(req.rawBody)
     .digest("base64");
 
-  return crypto.timingSafeEqual(
-    Buffer.from(digest),
-    Buffer.from(hmac)
-  );
+  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
 }
 
-/* =========================================================
-   RECON SUMMARY (JOIN SAFE)
-========================================================= */
-app.get("/recon/summary", async (_, res) => {
-  const { rows } = await pool.query(`
-    SELECT
-      bucket,
-      COUNT(*) AS count,
-      SUM(COALESCE(o.order_total,0)) AS value
-    FROM (
-      SELECT
-        s.awb,
-        CASE
-          WHEN s.last_known_status ILIKE '%DELIVERED%' THEN 'delivered'
-          WHEN s.last_known_status ILIKE '%OUT FOR DELIVERY%' THEN 'out_for_delivery'
-          WHEN s.last_known_status ILIKE '%NDR%' THEN 'ndr'
-          WHEN s.last_known_status ILIKE '%RTO%' THEN 'rto'
-          ELSE 'in_transit'
-        END AS bucket,
-        s.shopify_order_id
-      FROM shipments s
-    ) t
-    LEFT JOIN orders_ops o
-      ON o.shopify_order_id = t.shopify_order_id
-    GROUP BY bucket
-  `);
+/* ===============================
+   SLA CALC
+================================ */
+function nextCheck(status, firstNdrAt) {
+  const now = new Date();
 
-  const counts = {};
-  const revenue = {
-    realized: 0,
-    probable: 0,
-    questionable: 0,
-    dead: 0
-  };
+  if (!status) return new Date(now.getTime() + 24 * 3600 * 1000);
 
-  rows.forEach(r => {
-    counts[r.bucket] = Number(r.count);
+  const s = status.toUpperCase();
 
-    if (r.bucket === "delivered") revenue.realized += Number(r.value);
-    if (r.bucket === "out_for_delivery" || r.bucket === "in_transit")
-      revenue.probable += Number(r.value);
-    if (r.bucket === "ndr") revenue.questionable += Number(r.value);
-    if (r.bucket === "rto") revenue.dead += Number(r.value);
-  });
+  if (s.includes("DELIVERED")) return new Date("9999-01-01");
 
-  res.json({
-    counts,
-    revenue,
-    acos: {
-      worst_case: 0,
-      probable_case: 0,
-      best_case: 0
-    }
-  });
+  if (s.includes("OUT FOR DELIVERY"))
+    return new Date(now.getTime() + 60 * 60 * 1000);
+
+  if (s.includes("NDR") || s.includes("FAILED")) {
+    if (!firstNdrAt)
+      return new Date(now.getTime() + 6 * 3600 * 1000);
+
+    const hours = (now - new Date(firstNdrAt)) / 3600000;
+    return new Date(
+      now.getTime() + (hours < 24 ? 6 : 2) * 3600 * 1000
+    );
+  }
+
+  return new Date(now.getTime() + 24 * 3600 * 1000);
+}
+
+/* ===============================
+   OPS CLASSIFIER
+================================ */
+function classify(status) {
+  if (!status) return "clean";
+  const s = status.toUpperCase();
+
+  if (s.includes("OUT FOR DELIVERY")) return "out_for_delivery";
+  if (s.includes("NDR") || s.includes("FAILED")) return "ndr";
+
+  return "clean";
+}
+
+/* ===============================
+   CRON TRACK
+================================ */
+app.post("/_cron/track/run", async (_, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, awb, last_known_status, first_ndr_at
+     FROM shipments
+     WHERE next_check_at <= NOW()
+     LIMIT 50`
+  );
+
+  for (const r of rows) {
+    const next = nextCheck(r.last_known_status, r.first_ndr_at);
+    await pool.query(
+      `UPDATE shipments
+       SET next_check_at = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [next, r.id]
+    );
+  }
+
+  res.json({ ok: true, processed: rows.length });
 });
 
-/* =========================================================
-   RECON DASHBOARD (JOIN SAFE)
-========================================================= */
-app.get("/recon/dashboard", async (_, res) => {
+/* ===============================
+   OPS DASHBOARD
+================================ */
+app.get("/ops/dashboard", async (_, res) => {
   const { rows } = await pool.query(`
-    SELECT
-      s.awb,
-      s.last_known_status,
-      o.shopify_order_name,
-      o.order_type,
-      o.order_total
-    FROM shipments s
-    LEFT JOIN orders_ops o
-      ON o.shopify_order_id = s.shopify_order_id
-    ORDER BY s.updated_at DESC
+    SELECT awb, last_known_status
+    FROM shipments
+    WHERE delivered_at IS NULL
   `);
 
-  res.json({ rows });
-});
+  const out = { attention: [], ndr: [], out_for_delivery: [] };
 
-/* =========================================================
-   CSV EXPORT (JOIN SAFE)
-========================================================= */
-app.get("/recon/export.csv", async (_, res) => {
-  const { rows } = await pool.query(`
-    SELECT
-      s.awb,
-      o.shopify_order_name,
-      o.order_type,
-      s.last_known_status,
-      o.order_total
-    FROM shipments s
-    LEFT JOIN orders_ops o
-      ON o.shopify_order_id = s.shopify_order_id
-  `);
+  for (const r of rows) {
+    const bucket = classify(r.last_known_status);
+    if (bucket !== "clean") out[bucket].push(r);
+  }
 
-  let csv = "AWB,Order,Type,Status,OrderValue\n";
-  rows.forEach(r => {
-    csv += `${r.awb},${r.shopify_order_name},${r.order_type},${r.last_known_status},${r.order_total}\n`;
-  });
-
-  res.setHeader("Content-Type", "text/csv");
-  res.send(csv);
+  res.json(out);
 });
 
 /* ===============================
