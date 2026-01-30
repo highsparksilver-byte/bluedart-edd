@@ -3,21 +3,17 @@ import axios from "axios";
 import xml2js from "xml2js";
 import pg from "pg";
 
-const { Pool } = pg;
-
 /* ===============================
-   🗄️ DATABASE
+   🚀 APP + DB
 ================================ */
+const app = express();
+app.use(express.json());
+
+const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
-/* ===============================
-   🚀 APP
-================================ */
-const app = express();
-app.use(express.json());
 
 /* ===============================
    🌍 CORS
@@ -38,8 +34,10 @@ const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
 const CLIENT_ID = clean(process.env.CLIENT_ID);
 const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
 const LOGIN_ID = clean(process.env.LOGIN_ID);
+
 const LICENCE_KEY_EDD = clean(process.env.BD_LICENCE_KEY_EDD);
 const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
+
 const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
 const SR_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
 
@@ -88,7 +86,7 @@ async function getShiprocketJwt() {
 }
 
 /* ===============================
-   🕒 DATE HELPERS (IST SAFE)
+   🕒 DATE HELPERS (SAFE)
 ================================ */
 function getISTNow() {
   const now = new Date();
@@ -96,46 +94,36 @@ function getISTNow() {
 }
 
 function isHoliday(d) {
-  if (!(d instanceof Date) || isNaN(d)) return false;
+  if (!d || isNaN(d.getTime())) return false;
   const iso = d.toISOString().slice(0, 10);
   return d.getUTCDay() === 0 || HOLIDAYS.includes(iso);
 }
 
-function getNextWorkingDate() {
-  let d = getISTNow();
-  while (isHoliday(d)) d.setDate(d.getDate() + 1);
-  return d;
-}
-
-/* ===============================
-   📦 EDD HELPERS
-================================ */
 function parseBlueDartDate(str) {
   if (!str) return null;
   const [dd, mon, yyyy] = str.split("-");
   const months = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
-  if (months[mon] === undefined) return null;
-  return new Date(Date.UTC(Number(yyyy), months[mon], Number(dd)));
+  if (!(mon in months)) return null;
+  const d = new Date(Date.UTC(Number(yyyy), months[mon], Number(dd)));
+  return isNaN(d.getTime()) ? null : d;
 }
 
+/* ===============================
+   📦 EDD CORE LOGIC
+================================ */
 function confidenceBand(minDate) {
-  if (!(minDate instanceof Date) || isNaN(minDate)) return null;
-
   const now = getISTNow();
-  const day = now.getDay();
-  const hour = now.getHours();
+  const day = now.getUTCDay(); // 6 Sat, 0 Sun
+  const hour = now.getUTCHours();
 
   let addDays = 1;
   if ((day === 6 && hour >= 11) || day === 0) addDays = 2;
 
-  const start = new Date(minDate);
-  const end = new Date(minDate);
+  const start = new Date(minDate.getTime());
+  const end = new Date(minDate.getTime());
   end.setUTCDate(end.getUTCDate() + addDays);
 
-  while (isHoliday(end)) end.setUTCDate(end.getUTCDate() + 1);
-
-  const fmt = d =>
-    `${d.getUTCDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()]}`;
+  const fmt = (d) => `${d.getUTCDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()]}`;
 
   return start.getUTCMonth() === end.getUTCMonth()
     ? `${start.getUTCDate()}–${fmt(end)}`
@@ -144,28 +132,20 @@ function confidenceBand(minDate) {
 
 function getBadge(minDate, city) {
   if (!minDate) return "STANDARD";
-  const diffDays = Math.max(0, Math.round((minDate - getISTNow()) / 86400000));
+  const diff = Math.round((minDate.getTime() + 5.5*3600000 - getISTNow()) / 86400000);
   const isMetro = METROS.some(m => (city || "").toUpperCase().includes(m));
-  if (isMetro && diffDays <= 2) return "METRO_EXPRESS";
-  if (diffDays <= 3) return "EXPRESS";
+  if (isMetro && diff <= 2) return "METRO_EXPRESS";
+  if (diff <= 3) return "EXPRESS";
   return "STANDARD";
 }
 
-/* ===============================
-   🏙️ CITY LOOKUP
-================================ */
 async function getCity(pincode) {
   try {
     const r = await axios.get(`https://api.postalpincode.in/pincode/${pincode}`, { timeout: 3000 });
     return r.data?.[0]?.PostOffice?.[0]?.District || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/* ===============================
-   📦 EDD FETCH (BLUEDART → SHIPROCKET)
-================================ */
 async function getBluedartEDD(pincode) {
   try {
     const jwt = await getBluedartJwt();
@@ -176,16 +156,14 @@ async function getBluedartEDD(pincode) {
         pPinCodeTo: pincode,
         pProductCode: "A",
         pSubProductCode: "P",
-        pPudate: `/Date(${getNextWorkingDate().getTime()})/`,
+        pPudate: `/Date(${getISTNow().getTime()})/`,
         pPickupTime: "16:00",
         profile: { Api_type: "S", LicenceKey: LICENCE_KEY_EDD, LoginID: LOGIN_ID }
       },
       { headers: { JWTToken: jwt } }
     );
     return r.data?.GetDomesticTransitTimeForPinCodeandProductResult?.ExpectedDateDelivery || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function getShiprocketEDD(pincode) {
@@ -197,13 +175,11 @@ async function getShiprocketEDD(pincode) {
       { headers: { Authorization: `Bearer ${token}` } }
     );
     return r.data?.data?.available_courier_companies?.[0]?.etd || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 /* ===============================
-   🛣️ EDD ROUTE
+   📦 EDD ROUTE
 ================================ */
 const eddCache = new Map();
 
@@ -212,12 +188,10 @@ app.post("/edd", async (req, res) => {
   if (!/^[0-9]{6}$/.test(pincode)) return res.json({ edd_display: null });
 
   const now = getISTNow();
-  const key = `${pincode}-${now.toISOString().slice(0,10)}-${now.getHours() >= 11 ? "PM" : "AM"}`;
-
+  const key = `${pincode}-${now.toISOString().slice(0,10)}-${now.getUTCHours() >= 11 ? "PM" : "AM"}`;
   if (eddCache.has(key)) return res.json(eddCache.get(key));
 
   const city = await getCity(pincode);
-
   let raw = await getBluedartEDD(pincode);
   let minDate = parseBlueDartDate(raw);
 
@@ -226,9 +200,7 @@ app.post("/edd", async (req, res) => {
     if (sr) minDate = new Date(sr);
   }
 
-  if (!(minDate instanceof Date) || isNaN(minDate)) {
-    return res.json({ edd_display: null });
-  }
+  if (!minDate || isNaN(minDate)) return res.json({ edd_display: null });
 
   const response = {
     edd_display: confidenceBand(minDate),
@@ -241,9 +213,66 @@ app.post("/edd", async (req, res) => {
 });
 
 /* ===============================
+   📦 CUSTOMER TRACKING (SECURE)
+================================ */
+const rateLimit = new Map();
+
+function normalizePhone(p) {
+  const digits = p.replace(/\D/g, "");
+  if (digits.length === 10) return "+91" + digits;
+  if (digits.length === 12 && digits.startsWith("91")) return "+" + digits;
+  return null;
+}
+
+app.post("/track/customer", async (req, res) => {
+  const { phone, email } = req.body;
+  if (!phone && !email) return res.status(400).json({ error: "Phone or email required" });
+
+  const key = phone || email;
+  const now = Date.now();
+  const entry = rateLimit.get(key) || { count: 0, ts: now };
+  if (now - entry.ts < 60000 && entry.count >= 5) {
+    return res.status(429).json({ error: "Too many attempts for this identifier" });
+  }
+  entry.count++;
+  entry.ts = now;
+  rateLimit.set(key, entry);
+
+  let where = [];
+  let params = [];
+
+  if (phone) {
+    const n = normalizePhone(phone);
+    if (!n) return res.json({ error: "Invalid phone" });
+    where.push("customer_mobile = $1");
+    params.push(n);
+  }
+  if (email) {
+    where.push("customer_email = $2");
+    params.push(email);
+  }
+
+  const q = `
+    SELECT * FROM shipments
+    WHERE ${where.join(" AND ")}
+    ORDER BY created_at DESC
+  `;
+
+  const { rows } = await pool.query(q, params);
+  if (!rows.length) return res.json({ error: "No orders found" });
+
+  const active = rows.filter(r => !r.delivery_confirmed);
+  if (active.length) {
+    return res.json({ mode: "ACTIVE_ONLY", count: active.length, orders: active });
+  }
+
+  return res.json({ mode: "LATEST_DELIVERED", count: 1, orders: [rows[0]] });
+});
+
+/* ===============================
    ❤️ HEALTH
 ================================ */
 app.get("/health", (_, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🚀 Server running on", PORT));
+app.listen(PORT, () => console.log("🚀 Server on", PORT));
