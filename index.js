@@ -1,242 +1,177 @@
 import express from "express";
-import crypto from "crypto";
 import pg from "pg";
+import crypto from "crypto";
 
 const app = express();
 
-/* =========================================================
-   🔐 RAW BODY (required for Shopify HMAC verification)
-========================================================= */
-app.use(
-  express.json({
-    verify: (req, res, buf) => {
-      req.rawBody = buf;
-    }
-  })
-);
+/* ===============================
+   RAW BODY (WEBHOOK SAFE)
+================================ */
+app.use(express.json());
 
-/* =========================================================
-   🌍 CORS
-========================================================= */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-/* =========================================================
-   🔑 ENV
-========================================================= */
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-if (!SHOPIFY_WEBHOOK_SECRET) {
-  console.error("❌ SHOPIFY_WEBHOOK_SECRET missing");
-}
-
-/* =========================================================
-   🗄️ DB
-========================================================= */
+/* ===============================
+   DB
+================================ */
 const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-/* =========================================================
-   🔐 HMAC VERIFY
-========================================================= */
-function verifyShopifyWebhook(req) {
-  const hmac = req.get("X-Shopify-Hmac-Sha256");
-  if (!hmac || !req.rawBody) return false;
+/* ===============================
+   CONSTANTS
+================================ */
+const PPCOD_ADVANCE = 100;
+const AD_SPEND = Number(process.env.MONTHLY_AD_SPEND || 0);
 
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(req.rawBody)
-    .digest("base64");
+/* ===============================
+   HELPERS
+================================ */
+function classifyRevenue(status, hoursSinceUpdate) {
+  const s = (status || "").toUpperCase();
 
-  return crypto.timingSafeEqual(
-    Buffer.from(digest),
-    Buffer.from(hmac)
-  );
+  if (s.includes("DELIVERED")) return "REALIZED";
+  if (s.includes("OUT FOR")) return "PROBABLE";
+  if (s.includes("IN TRANSIT")) return "PROBABLE";
+
+  if (s.includes("NDR")) {
+    if (hoursSinceUpdate <= 24) return "PROBABLE";
+    if (hoursSinceUpdate <= 72) return "QUESTIONABLE";
+    return "WEAK";
+  }
+
+  if (s.includes("RTO") || s.includes("CANCEL")) return "DEAD";
+  return "UNKNOWN";
 }
 
-/* =========================================================
-   🧠 ORDER TYPE LOGIC
-========================================================= */
-function detectOrderType(order) {
-  const tags = (order.tags || "").toLowerCase();
-
-  if (tags.includes("ppcod")) return "PPCOD";
-  if (order.financial_status === "paid") return "PREPAID";
-  return "COD";
-}
-
-/* =========================================================
-   📦 WEBHOOK: ORDER PAID
-========================================================= */
-app.post("/webhooks/orders-paid", async (req, res) => {
-  try {
-    if (!verifyShopifyWebhook(req)) {
-      return res.status(401).json({ error: "invalid_signature" });
-    }
-
-    const o = req.body;
-
-    const orderType = detectOrderType(o);
-
-    await pool.query(
-      `
-      INSERT INTO orders_ops (
-        shopify_order_id,
-        shopify_order_name,
-        shop_domain,
-        financial_status,
-        fulfillment_status,
-        is_paid,
-        is_cancelled,
-        order_type,
-        tags,
-        customer_email,
-        customer_phone,
-        currency,
-        order_total,
-        total_tax,
-        total_discounts
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,false,$7,$8,$9,$10,$11,$12,$13,$14)
-      ON CONFLICT (shopify_order_id)
-      DO UPDATE SET
-        financial_status = EXCLUDED.financial_status,
-        is_paid = EXCLUDED.is_paid,
-        updated_at = NOW()
-      `,
-      [
-        o.id.toString(),
-        o.name,
-        o.shop_domain || null,
-        o.financial_status,
-        o.fulfillment_status,
-        o.financial_status === "paid",
-        orderType,
-        o.tags ? o.tags.split(",") : [],
-        o.email || null,
-        o.phone || null,
-        o.currency || "INR",
-        Number(o.total_price || 0),
-        Number(o.total_tax || 0),
-        Number(o.total_discounts || 0)
-      ]
-    );
-
-    console.log("✅ orders-paid:", o.name);
-    res.json({ ok: true });
-
-  } catch (err) {
-    console.error("orders-paid error:", err);
-    res.status(500).json({ error: "orders-paid-failed" });
-  }
-});
-
-/* =========================================================
-   📦 WEBHOOK: FULFILLMENT CREATED
-========================================================= */
-app.post("/webhooks/fulfillment-created", async (req, res) => {
-  try {
-    if (!verifyShopifyWebhook(req)) {
-      return res.status(401).json({ error: "invalid_signature" });
-    }
-
-    const f = req.body;
-    const orderId = f.order_id?.toString();
-
-    await pool.query(
-      `
-      UPDATE orders_ops
-      SET fulfillment_status = 'fulfilled',
-          fulfilled_at = NOW(),
-          updated_at = NOW()
-      WHERE shopify_order_id = $1
-      `,
-      [orderId]
-    );
-
-    console.log("📦 fulfillment:", orderId);
-    res.json({ ok: true });
-
-  } catch (err) {
-    console.error("fulfillment error:", err);
-    res.status(500).json({ error: "fulfillment-failed" });
-  }
-});
-
-/* =========================================================
-   ❌ WEBHOOK: ORDER CANCELLED
-========================================================= */
-app.post("/webhooks/orders-cancelled", async (req, res) => {
-  try {
-    if (!verifyShopifyWebhook(req)) {
-      return res.status(401).json({ error: "invalid_signature" });
-    }
-
-    const o = req.body;
-
-    await pool.query(
-      `
-      UPDATE orders_ops
-      SET is_cancelled = true,
-          fulfillment_status = 'cancelled',
-          cancelled_at = NOW(),
-          updated_at = NOW()
-      WHERE shopify_order_id = $1
-      `,
-      [o.id.toString()]
-    );
-
-    console.log("❌ cancelled:", o.name);
-    res.json({ ok: true });
-
-  } catch (err) {
-    console.error("cancel error:", err);
-    res.status(500).json({ error: "cancel-failed" });
-  }
-});
-
-/* =========================================================
-   📊 OPS DASHBOARD – ORDERS
-========================================================= */
-app.get("/ops/orders", async (_, res) => {
-  const { rows } = await pool.query(`
-    SELECT *
-    FROM orders_ops
-    ORDER BY created_at DESC
+/* ===============================
+   STEP 8.3 – RECON SUMMARY
+================================ */
+app.get("/recon/summary", async (_, res) => {
+  const { rows: shipments } = await pool.query(`
+    SELECT
+      s.awb,
+      s.last_known_status,
+      s.updated_at,
+      o.order_type,
+      o.order_total,
+      o.financial_status
+    FROM shipments s
+    LEFT JOIN orders_ops o ON o.shopify_order_name = s.order_name
   `);
 
-  const prepaid_fast_ship = rows.filter(
-    r => r.order_type === "PREPAID" && !r.is_cancelled && r.fulfillment_status !== "fulfilled"
-  );
+  const counts = {
+    delivered: 0,
+    out_for_delivery: 0,
+    in_transit: 0,
+    ndr: 0,
+    rto: 0
+  };
 
-  const ppcod_to_confirm = rows.filter(
-    r => r.order_type === "PPCOD" && !r.is_cancelled && r.fulfillment_status !== "fulfilled"
-  );
+  const revenue = {
+    realized: 0,
+    probable: 0,
+    questionable: 0,
+    dead: 0
+  };
 
-  const cod_to_call = rows.filter(
-    r => r.order_type === "COD" && !r.is_cancelled && r.fulfillment_status !== "fulfilled"
-  );
+  const now = Date.now();
 
-  const cancelled = rows.filter(r => r.is_cancelled);
+  for (const s of shipments) {
+    const status = (s.last_known_status || "").toUpperCase();
+    const hours =
+      (now - new Date(s.updated_at).getTime()) / 36e5;
 
-  res.json({
-    prepaid_fast_ship,
-    ppcod_to_confirm,
-    cod_to_call,
-    cancelled
-  });
+    // COUNT buckets
+    if (status.includes("DELIVERED")) counts.delivered++;
+    else if (status.includes("OUT FOR")) counts.out_for_delivery++;
+    else if (status.includes("IN TRANSIT")) counts.in_transit++;
+    else if (status.includes("NDR")) counts.ndr++;
+    else if (status.includes("RTO") || status.includes("CANCEL"))
+      counts.rto++;
+
+    // REVENUE logic
+    const bucket = classifyRevenue(status, hours);
+    const total = Number(s.order_total || 0);
+
+    if (s.order_type === "PPCOD") {
+      revenue.realized += PPCOD_ADVANCE;
+      if (bucket === "REALIZED") revenue.realized += total - PPCOD_ADVANCE;
+      else if (bucket === "PROBABLE") revenue.probable += total - PPCOD_ADVANCE;
+      else if (bucket === "QUESTIONABLE") revenue.questionable += total - PPCOD_ADVANCE;
+      else revenue.dead += total - PPCOD_ADVANCE;
+      continue;
+    }
+
+    if (bucket === "REALIZED") revenue.realized += total;
+    else if (bucket === "PROBABLE") revenue.probable += total;
+    else if (bucket === "QUESTIONABLE") revenue.questionable += total;
+    else revenue.dead += total;
+  }
+
+  const acos = {
+    worst_case: AD_SPEND / Math.max(revenue.realized, 1),
+    probable_case: AD_SPEND / Math.max(revenue.realized + revenue.probable, 1),
+    best_case:
+      AD_SPEND /
+      Math.max(
+        revenue.realized + revenue.probable + revenue.questionable,
+        1
+      )
+  };
+
+  res.json({ counts, revenue, acos });
 });
 
-/* =========================================================
-   ❤️ HEALTH
-========================================================= */
+/* ===============================
+   STEP 8.4 – DASHBOARD VIEW
+================================ */
+app.get("/recon/dashboard", async (_, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      s.awb,
+      s.last_known_status,
+      o.shopify_order_name,
+      o.order_type,
+      o.order_total
+    FROM shipments s
+    LEFT JOIN orders_ops o ON o.shopify_order_name = s.order_name
+  `);
+
+  res.json({ rows });
+});
+
+/* ===============================
+   STEP 8.4 – CSV EXPORT
+================================ */
+app.get("/recon/export.csv", async (_, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      s.awb,
+      o.shopify_order_name,
+      o.order_type,
+      s.last_known_status,
+      o.order_total
+    FROM shipments s
+    LEFT JOIN orders_ops o ON o.shopify_order_name = s.order_name
+  `);
+
+  let csv =
+    "AWB,Order,Type,Status,OrderValue\n" +
+    rows
+      .map(
+        r =>
+          `${r.awb},${r.shopify_order_name},${r.order_type},${r.last_known_status},${r.order_total}`
+      )
+      .join("\n");
+
+  res.header("Content-Type", "text/csv");
+  res.send(csv);
+});
+
+/* ===============================
+   HEALTH
+================================ */
 app.get("/health", (_, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 10000;
