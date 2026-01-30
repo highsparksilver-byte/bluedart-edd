@@ -16,23 +16,10 @@ const pool = new Pool({
 });
 
 /* ===============================
-   🌍 CORS
-================================ */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-/* ===============================
    🔑 ENV
 ================================ */
 const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
 
-const CLIENT_ID = clean(process.env.CLIENT_ID);
-const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
 const LOGIN_ID = clean(process.env.LOGIN_ID);
 const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
 const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
@@ -43,12 +30,13 @@ console.log("🚀 Ops Logistics running");
 /* ===============================
    🔐 JWT CACHE
 ================================ */
-let bdJwt = null, bdJwtAt = 0;
-let srJwt = null, srJwtAt = 0;
+let srJwt = null;
+let srJwtAt = 0;
 
 async function getShiprocketJwt() {
   if (!SR_EMAIL || !SR_PASSWORD) return null;
   if (srJwt && Date.now() - srJwtAt < 7 * 24 * 60 * 60 * 1000) return srJwt;
+
   const r = await axios.post(
     "https://apiv2.shiprocket.in/v1/external/auth/login",
     { email: SR_EMAIL, password: SR_PASSWORD }
@@ -79,6 +67,7 @@ function nextDay8am() {
 async function trackBluedart(awb) {
   try {
     const url = `https://api.bluedart.com/servlet/RoutingServlet?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
+
     const r = await axios.get(url, { responseType: "text", timeout: 8000 });
 
     const parsed = await new Promise((res, rej) =>
@@ -91,7 +80,7 @@ async function trackBluedart(awb) {
     return {
       source: "bluedart",
       actual_courier: "Blue Dart",
-      status: s.Status,
+      status: s.Status || "IN TRANSIT",
       delivered: s.StatusType === "DL",
       ndr_reason: null,
       scans: Array.isArray(s.Scans?.ScanDetail) ? s.Scans.ScanDetail : []
@@ -112,15 +101,20 @@ async function trackShiprocket(awb) {
     );
 
     const td = r.data.tracking_data;
-    const last = td.shipment_track?.[0];
+    const last = td?.shipment_track?.[0];
+
+    const normalizedStatus =
+      last?.["sr-status-label"] ||
+      td?.current_status ||
+      "IN TRANSIT";
 
     return {
       source: "shiprocket",
-      actual_courier: td.courier_name || null,
-      status: last?.["sr-status-label"] || td.current_status,
-      delivered: td.current_status === "Delivered",
+      actual_courier: td?.courier_name || null,
+      status: normalizedStatus,
+      delivered: normalizedStatus.toUpperCase().includes("DELIVERED"),
       ndr_reason: last?.activity || null,
-      scans: td.shipment_track || []
+      scans: td?.shipment_track || []
     };
   } catch {
     return null;
@@ -128,10 +122,10 @@ async function trackShiprocket(awb) {
 }
 
 /* ===============================
-   🧠 OPS LOGIC (STEP 9.3)
+   🧠 OPS LOGIC (HARDENED)
 ================================ */
 function computeNextCheck(status) {
-  const s = (status || "").toUpperCase();
+  const s = (status || "IN TRANSIT").toUpperCase();
 
   if (s.includes("DELIVERED")) return new Date("9999-01-01");
   if (s.includes("OUT FOR")) return new Date(Date.now() + 60 * 60 * 1000);
@@ -141,29 +135,28 @@ function computeNextCheck(status) {
   return new Date(Date.now() + 6 * 60 * 60 * 1000);
 }
 
-function detectOpsFlag(row, newStatus) {
+function detectOpsFlag(row, status) {
+  const s = (status || "IN TRANSIT").toUpperCase();
   const now = istNow();
   const created = row.created_at ? new Date(row.created_at) : now;
   const hours = (now - created) / 36e5;
 
-  let flags = [];
-
   const slaDays = row.tracking_source === "shiprocket" ? 5 : 4;
-  if (!newStatus.toUpperCase().includes("DELIVERED") && hours > slaDays * 24) {
-    flags.push("SLA_BREACH");
+
+  if (!s.includes("DELIVERED") && hours > slaDays * 24) {
+    return "SLA_BREACH";
   }
 
-  if (row.last_known_status === newStatus && row.last_checked_at) {
+  if (row.last_known_status === status && row.last_checked_at) {
     const h = (now - new Date(row.last_checked_at)) / 36e5;
-    if (h > 48) flags.push("STUCK_IN_TRANSIT");
+    if (h > 48) return "STUCK_IN_TRANSIT";
   }
 
-  if (flags.length >= 2) return "ESCALATE";
-  return flags[0] || null;
+  return null;
 }
 
 /* ===============================
-   💾 UPDATE ONLY (SAFE)
+   💾 PERSIST (UPDATE ONLY)
 ================================ */
 async function persistTracking(awb, data) {
   const { rows } = await pool.query(
