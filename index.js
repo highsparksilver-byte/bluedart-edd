@@ -26,183 +26,84 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ===============================
-   🔑 ENV
-================================ */
-const LOGIN_ID = process.env.LOGIN_ID;
-const LICENCE_KEY_TRACK = process.env.BD_LICENCE_KEY_TRACK;
-const SR_EMAIL = process.env.SHIPROCKET_EMAIL;
-const SR_PASSWORD = process.env.SHIPROCKET_PASSWORD;
-
 console.log("🚀 Ops Logistics running");
 
 /* ===============================
-   🔐 SHIPROCKET TOKEN
+   🧭 OPS DASHBOARD (READ ONLY)
 ================================ */
-let srJwt = null;
-let srJwtAt = 0;
-
-async function getShiprocketJwt() {
-  if (srJwt && Date.now() - srJwtAt < 8 * 24 * 60 * 60 * 1000) return srJwt;
-  const r = await axios.post(
-    "https://apiv2.shiprocket.in/v1/external/auth/login",
-    { email: SR_EMAIL, password: SR_PASSWORD }
-  );
-  srJwt = r.data.token;
-  srJwtAt = Date.now();
-  return srJwt;
-}
-
-/* ===============================
-   🧠 STATUS + SLA LOGIC
-================================ */
-function classifyStatus(raw = "") {
-  const s = String(raw).toUpperCase();
-  if (s.includes("DELIVERED")) return "DELIVERED";
-  if (s.includes("OUT FOR DELIVERY")) return "OFD";
-  if (s.includes("NDR") || s.includes("FAILED") || s.includes("ATTEMPT"))
-    return "NDR";
-  if (s.includes("IN TRANSIT") || s.includes("SHIPPED")) return "TRANSIT";
-  return "NO_INFO";
-}
-
-function hoursBetween(a, b) {
-  return Math.abs(a.getTime() - b.getTime()) / 36e5;
-}
-
-function computeNextCheck(statusType, firstNdrAt) {
-  const now = new Date();
-
-  if (statusType === "DELIVERED") {
-    return new Date("9999-01-01");
-  }
-
-  if (statusType === "OFD") {
-    return new Date(now.getTime() + 60 * 60 * 1000);
-  }
-
-  if (statusType === "NDR") {
-    if (!firstNdrAt) {
-      return new Date(now.getTime() + 6 * 60 * 60 * 1000);
-    }
-    const hrs = hoursBetween(now, firstNdrAt);
-    if (hrs <= 14) {
-      return new Date(now.getTime() + 6 * 60 * 60 * 1000);
-    }
-    return new Date(now.getTime() + 2 * 60 * 60 * 1000);
-  }
-
-  return new Date(now.getTime() + 24 * 60 * 60 * 1000);
-}
-
-/* ===============================
-   🚚 TRACKERS
-================================ */
-async function trackBluedart(awb) {
+app.get("/ops/dashboard", async (_req, res) => {
   try {
-    const url = `https://api.bluedart.com/servlet/RoutingServlet?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
-    const r = await axios.get(url, { responseType: "text" });
-    const parsed = await xml2js.parseStringPromise(r.data, {
-      explicitArray: false
+    const { rows } = await pool.query(`
+      SELECT
+        awb,
+        actual_courier,
+        last_known_status,
+        delivered_at,
+        first_ndr_at,
+        next_check_at
+      FROM shipments
+    `);
+
+    const now = new Date();
+
+    const attention = [];
+    const ndr = [];
+    const outForDelivery = [];
+
+    for (const r of rows) {
+      const status = (r.last_known_status || "").toUpperCase();
+      const delivered = !!r.delivered_at;
+
+      if (!delivered && r.next_check_at && new Date(r.next_check_at) < now) {
+        attention.push({
+          awb: r.awb,
+          courier: r.actual_courier,
+          status: r.last_known_status,
+          next_check_at: r.next_check_at
+        });
+      }
+
+      if (
+        !delivered &&
+        (status.includes("NDR") || r.first_ndr_at)
+      ) {
+        ndr.push({
+          awb: r.awb,
+          courier: r.actual_courier,
+          status: r.last_known_status,
+          first_ndr_at: r.first_ndr_at
+        });
+      }
+
+      if (
+        !delivered &&
+        status.includes("OUT FOR DELIVERY")
+      ) {
+        outForDelivery.push({
+          awb: r.awb,
+          courier: r.actual_courier,
+          status: r.last_known_status
+        });
+      }
+    }
+
+    res.json({
+      attention,
+      ndr,
+      out_for_delivery: outForDelivery
     });
-    const s = parsed?.ShipmentData?.Shipment;
-    if (!s) return null;
-    return {
-      source: "bluedart",
-      actual_courier: "Blue Dart",
-      status: s.Status || "",
-      scans: s.Scans?.ScanDetail
-        ? Array.isArray(s.Scans.ScanDetail)
-          ? s.Scans.ScanDetail
-          : [s.Scans.ScanDetail]
-        : []
-    };
-  } catch {
-    return null;
+  } catch (err) {
+    console.error("OPS DASHBOARD ERROR", err);
+    res.status(500).json({ error: "ops_dashboard_failed" });
   }
-}
-
-async function trackShiprocket(awb) {
-  try {
-    const token = await getShiprocketJwt();
-    const r = await axios.get(
-      `https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const t = r.data.tracking_data;
-    if (!t) return null;
-    return {
-      source: "shiprocket",
-      actual_courier: t.courier_name || null,
-      status: t.current_status || "",
-      scans: t.shipment_track_activities || []
-    };
-  } catch {
-    return null;
-  }
-}
-
-/* ===============================
-   💾 DB UPDATE (SAFE)
-================================ */
-async function persistTracking(awb, data) {
-  const statusType = classifyStatus(data.status);
-  const now = new Date();
-
-  const { rows } = await pool.query(
-    "SELECT first_ndr_at FROM shipments WHERE awb=$1",
-    [awb]
-  );
-
-  const existingFirstNdr = rows[0]?.first_ndr_at || null;
-
-  const firstNdrAt =
-    statusType === "NDR" && !existingFirstNdr ? now : existingFirstNdr;
-
-  const nextCheck = computeNextCheck(statusType, firstNdrAt);
-
-  await pool.query(
-    `
-    UPDATE shipments SET
-      last_known_status=$2,
-      actual_courier=COALESCE($3, actual_courier),
-      delivered_at=CASE WHEN $4='DELIVERED' THEN NOW() ELSE delivered_at END,
-      first_ndr_at=$5,
-      next_check_at=$6,
-      updated_at=NOW()
-    WHERE awb=$1
-  `,
-    [
-      awb,
-      data.status,
-      data.actual_courier,
-      statusType,
-      firstNdrAt,
-      nextCheck
-    ]
-  );
-}
-
-/* ===============================
-   🌐 ROUTE
-================================ */
-app.get("/track", async (req, res) => {
-  const { awb } = req.query;
-  if (!awb) return res.status(400).json({ error: "AWB required" });
-
-  let data = await trackBluedart(awb);
-  if (!data) data = await trackShiprocket(awb);
-
-  if (!data) return res.status(404).json({ error: "Tracking not found" });
-
-  await persistTracking(awb, data);
-  res.json(data);
 });
 
 /* ===============================
    ❤️ HEALTH
 ================================ */
-app.get("/health", (_, res) => res.send("OK"));
+app.get("/health", (_req, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🚀 Server on", PORT));
+app.listen(PORT, () => {
+  console.log("🚀 Server on", PORT);
+});
