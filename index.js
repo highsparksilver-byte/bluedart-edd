@@ -1,6 +1,7 @@
 import express from "express";
 import axios from "axios";
 import xml2js from "xml2js";
+import crypto from "crypto";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -10,7 +11,7 @@ const { Pool } = pg;
 ================================================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
 /* =================================================
@@ -30,203 +31,158 @@ app.use((req, res, next) => {
   next();
 });
 
+const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
+
 /* =================================================
    🔑 ENV
 ================================================= */
-const clean = (v) => v?.replace(/\r|\n|\t/g, "").trim();
+const {
+  SHOPIFY_CLIENT_ID,
+  SHOPIFY_CLIENT_SECRET,
+  SHOPIFY_API_VERSION,
+  APP_URL,
+  SHOPIFY_SHOP,
+  SHOPIFY_ACCESS_TOKEN,
+} = process.env;
 
-const LOGIN_ID = clean(process.env.LOGIN_ID);
-const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
-
-/* =================================================
-   📦 BLUE DART (BATCH)
-================================================= */
-async function trackBluedartBatch(awbs) {
-  try {
-    const numbers = awbs.join(",");
-
-    const url =
-      "https://api.bluedart.com/servlet/RoutingServlet" +
-      `?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}` +
-      `&awb=awb&numbers=${numbers}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
-
-    const res = await axios.get(url, {
-      responseType: "text",
-      timeout: 15000
-    });
-
-    const parsed = await new Promise((resolve, reject) =>
-      xml2js.parseString(res.data, { explicitArray: false }, (err, r) =>
-        err ? reject(err) : resolve(r)
-      )
-    );
-
-    const shipments = parsed?.ShipmentData?.Shipment;
-    if (!shipments) return {};
-
-    const list = Array.isArray(shipments) ? shipments : [shipments];
-    const map = {};
-
-    for (const s of list) {
-      map[s.$.WaybillNo] = {
-        status: s.Status,
-        statusType: s.StatusType
-      };
-    }
-
-    return map;
-  } catch (e) {
-    console.error("❌ Blue Dart batch failed:", e.message);
-    return {};
-  }
-}
-
-/* =================================================
-   🧠 NEXT CHECK CALCULATOR
-================================================= */
-function calculateNextCheck(statusType) {
-  const now = new Date();
-
-  if (statusType === "DL" || statusType === "RT") {
-    return new Date("9999-01-01");
-  }
-
-  if (statusType === "UD") {
-    return new Date(now.getTime() + 60 * 60 * 1000); // 1 hour
-  }
-
-  return new Date(now.getTime() + 12 * 60 * 60 * 1000); // 12 hours
-}
-
-/* =================================================
-   ⏱️ CRON SYNC (BATCHED)
-================================================= */
-app.post("/_cron/sync", async (req, res) => {
-  try {
-    console.log("🕒 Cron sync started (batched)");
-
-    const { rows } = await pool.query(`
-      SELECT id, awb
-      FROM shipments
-      WHERE courier = 'bluedart'
-        AND delivery_confirmed = false
-        AND next_check_at <= NOW()
-      ORDER BY next_check_at ASC
-      LIMIT 25
-    `);
-
-    console.log("📦 Due shipments:", rows.length);
-    if (rows.length === 0) {
-      return res.json({ ok: true, processed: 0 });
-    }
-
-    const awbs = rows.map(r => r.awb);
-    const results = await trackBluedartBatch(awbs);
-
-    let processed = 0;
-
-    for (const row of rows) {
-      const result = results[row.awb];
-      if (!result) {
-        console.log("⏭️ No tracking for", row.awb);
-        continue;
-      }
-
-      const delivered = result.statusType === "DL";
-      const nextCheck = calculateNextCheck(result.statusType);
-
-      await pool.query(`
-        UPDATE shipments
-        SET
-          last_known_status = $1,
-          last_checked_at = NOW(),
-          next_check_at = $2,
-          delivery_confirmed = $3,
-          delivered_at = CASE WHEN $3 = true THEN NOW() ELSE delivered_at END
-        WHERE awb = $4
-      `, [
-        result.status,
-        nextCheck,
-        delivered,
-        row.awb
-      ]);
-
-      processed++;
-      console.log("✅", row.awb, "→", result.statusType);
-    }
-
-    console.log("🏁 Cron finished | Processed:", processed);
-    res.json({ ok: true, processed });
-
-  } catch (err) {
-    console.error("🔥 Cron crashed:", err.message);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-/* =================================================
-   🧠 PHASE 7 — CUSTOMER TRACKING (SMART)
-================================================= */
-app.post("/track/customer", async (req, res) => {
-  const { phone, email, order_id } = req.body;
-
-  if (!phone && !email && !order_id) {
-    return res.status(400).json({
-      error: "Provide phone, email, or order_id"
-    });
-  }
-
-  let where = [];
-  let values = [];
-
-  if (phone) {
-    values.push(phone);
-    where.push(`customer_mobile = $${values.length}`);
-  }
-
-  if (email) {
-    values.push(email);
-    where.push(`customer_email = $${values.length}`);
-  }
-
-  if (order_id) {
-    values.push(order_id);
-    where.push(`shopify_order_id = $${values.length}`);
-  }
-
-  const { rows } = await pool.query(`
-    SELECT *
-    FROM shipments
-    WHERE ${where.join(" OR ")}
-    ORDER BY created_at DESC
-  `, values);
-
-  if (rows.length === 0) {
-    return res.status(404).json({ error: "No orders found" });
-  }
-
-  const active = rows.filter(r => r.delivery_confirmed === false);
-  const delivered = rows.filter(r => r.delivery_confirmed === true);
-
-  if (active.length > 0) {
-    return res.json({
-      mode: "ACTIVE_ONLY",
-      count: active.length,
-      orders: active
-    });
-  }
-
-  return res.json({
-    mode: "LATEST_DELIVERED",
-    count: 1,
-    orders: [delivered[0]]
-  });
-});
+console.log("🚀 Ops Logistics starting…");
 
 /* =================================================
    ❤️ HEALTH
 ================================================= */
 app.get("/health", (_, res) => res.send("OK"));
+
+/* =================================================
+   🛍️ SHOPIFY CLIENT
+================================================= */
+const shopify = axios.create({
+  baseURL: `https://${SHOPIFY_SHOP}/admin/api/${SHOPIFY_API_VERSION}`,
+  headers: {
+    "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+    "Content-Type": "application/json",
+  },
+});
+
+/* =================================================
+   📅 CONSTANTS
+================================================= */
+const SYNC_START_DATE = "2026-01-01T00:00:00Z";
+
+/* =================================================
+   🔁 PHASE 8.1 — SHOPIFY ORDER SYNC
+================================================= */
+app.post("/_cron/shopify/sync-orders", async (req, res) => {
+  console.log("🛍️ Shopify sync started");
+
+  let pageInfo = null;
+  let inserted = 0;
+  let scanned = 0;
+
+  try {
+    while (true) {
+      const params = {
+        limit: 50,
+        status: "any",
+        created_at_min: SYNC_START_DATE,
+      };
+
+      if (pageInfo) params.page_info = pageInfo;
+
+      const response = await shopify.get("/orders.json", { params });
+      const orders = response.data.orders || [];
+
+      if (!orders.length) break;
+
+      for (const order of orders) {
+        scanned++;
+
+        const phone =
+          order.phone ||
+          order.shipping_address?.phone ||
+          null;
+
+        for (const f of order.fulfillments || []) {
+          if (!f.tracking_number) continue;
+
+          const awb = f.tracking_number.trim();
+
+          await pool.query(
+            `
+            INSERT INTO shipments (
+              shopify_order_id,
+              shopify_order_name,
+              fulfillment_id,
+              awb,
+              courier,
+              customer_mobile,
+              customer_email,
+              last_known_status,
+              delivery_confirmed,
+              next_check_at,
+              shop_domain,
+              created_at,
+              updated_at
+            )
+            VALUES (
+              $1,$2,$3,$4,$5,$6,$7,$8,false,NOW(),$9,NOW(),NOW()
+            )
+            ON CONFLICT (awb)
+            DO UPDATE SET
+              last_known_status = EXCLUDED.last_known_status,
+              updated_at = NOW()
+          `,
+            [
+              order.id.toString(),
+              order.name,
+              f.id.toString(),
+              awb,
+              (f.tracking_company || "bluedart").toLowerCase(),
+              phone,
+              order.email,
+              f.status || "In Transit",
+              SHOPIFY_SHOP,
+            ]
+          );
+
+          inserted++;
+        }
+      }
+
+      const link = response.headers.link;
+      if (!link || !link.includes("rel=\"next\"")) break;
+
+      const match = link.match(/page_info=([^&>]+)/);
+      if (!match) break;
+
+      pageInfo = match[1];
+    }
+
+    console.log("✅ Shopify sync complete");
+    res.json({
+      ok: true,
+      scanned_orders: scanned,
+      shipments_upserted: inserted,
+    });
+
+  } catch (err) {
+    console.error("❌ Shopify sync failed");
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* =================================================
+   🧠 KEEP ALIVE (RENDER)
+================================================= */
+const SELF_URL = process.env.RENDER_EXTERNAL_URL
+  ? `${process.env.RENDER_EXTERNAL_URL}/health`
+  : null;
+
+if (SELF_URL) {
+  setInterval(() => {
+    axios.get(SELF_URL).catch(() => {});
+  }, 10 * 60 * 1000);
+}
 
 /* =================================================
    🚀 START
