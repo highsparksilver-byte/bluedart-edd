@@ -31,20 +31,18 @@ app.use((req, res, next) => {
 ================================ */
 const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
 
-const CLIENT_ID = clean(process.env.CLIENT_ID);
-const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
 const LOGIN_ID = clean(process.env.LOGIN_ID);
 const LICENCE_KEY_TRACK = clean(process.env.BD_LICENCE_KEY_TRACK);
-
 const SR_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
 const SR_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
 
 console.log("🚀 Ops Logistics running");
 
 /* ===============================
-   🔐 JWT CACHE
+   🔐 SHIPROCKET JWT
 ================================ */
-let srJwt = null, srJwtAt = 0;
+let srJwt = null;
+let srJwtAt = 0;
 
 async function getShiprocketJwt() {
   if (srJwt && Date.now() - srJwtAt < 8 * 24 * 60 * 60 * 1000) return srJwt;
@@ -58,7 +56,7 @@ async function getShiprocketJwt() {
 }
 
 /* ===============================
-   🚚 TRACKING HELPERS
+   🚚 TRACKERS
 ================================ */
 function mapShiprocketStatus(s = "") {
   s = s.toUpperCase();
@@ -125,7 +123,7 @@ async function trackShiprocket(awb) {
 }
 
 /* ===============================
-   🚚 TRACK ROUTE (STEP 4)
+   🚚 TRACK ROUTE (UPSERT)
 ================================ */
 app.get("/track", async (req, res) => {
   const { awb } = req.query;
@@ -135,32 +133,51 @@ app.get("/track", async (req, res) => {
   if (!data) data = await trackShiprocket(awb);
   if (!data) return res.status(404).json({ error: "Tracking details not found" });
 
-  /* ===== STEP 4 DB WRITE (ONLY IF EXISTS) ===== */
+  const delivered = data.statusType === "DL";
+
   try {
-    const { rows } = await pool.query(
-      "SELECT id FROM shipments WHERE awb = $1",
-      [awb]
+    await pool.query(
+      `
+      INSERT INTO shipments (
+        awb,
+        courier,
+        tracking_source,
+        actual_courier,
+        shopify_order_id,
+        shopify_order_name,
+        fulfillment_id,
+        customer_mobile,
+        last_known_status,
+        delivery_confirmed,
+        delivered_at,
+        last_checked_at
+      )
+      VALUES (
+        $1, $2, $3, $4,
+        'external', 'external', 'external',
+        'unknown',
+        $5, $6, CASE WHEN $6 THEN NOW() ELSE NULL END, NOW()
+      )
+      ON CONFLICT (awb)
+      DO UPDATE SET
+        actual_courier = EXCLUDED.actual_courier,
+        last_known_status = EXCLUDED.last_known_status,
+        last_checked_at = NOW(),
+        delivery_confirmed = CASE WHEN EXCLUDED.delivery_confirmed THEN true ELSE shipments.delivery_confirmed END,
+        delivered_at = CASE WHEN EXCLUDED.delivery_confirmed THEN NOW() ELSE shipments.delivered_at END,
+        updated_at = NOW()
+      `,
+      [
+        awb,
+        data.source,
+        data.source,
+        data.courier,
+        data.status,
+        delivered
+      ]
     );
-
-    if (rows.length > 0) {
-      const delivered = data.statusType === "DL";
-
-      await pool.query(
-        `
-        UPDATE shipments
-        SET actual_courier = COALESCE($1, actual_courier),
-            last_known_status = $2,
-            last_checked_at = NOW(),
-            delivery_confirmed = CASE WHEN $3 THEN true ELSE delivery_confirmed END,
-            delivered_at = CASE WHEN $3 THEN NOW() ELSE delivered_at END,
-            updated_at = NOW()
-        WHERE awb = $4
-        `,
-        [data.courier, data.status, delivered, awb]
-      );
-    }
   } catch (e) {
-    console.error("DB update failed", e.message);
+    console.error("UPSERT failed:", e.message);
   }
 
   res.json(data);
