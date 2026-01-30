@@ -114,10 +114,13 @@ function parseBlueDartDate(str) {
 function confidenceBand(minDate) {
   const now = getISTNow();
   const day = now.getUTCDay(), hour = now.getUTCHours();
-  let add = ((day===6 && hour>=11) || day===0) ? 2 : 1;
+  const add = ((day===6 && hour>=11) || day===0) ? 2 : 1;
+
   const end = new Date(minDate.getTime());
   end.setUTCDate(end.getUTCDate()+add);
+
   const fmt = d => `${d.getUTCDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()]}`;
+
   return minDate.getUTCMonth()===end.getUTCMonth()
     ? `${minDate.getUTCDate()}–${fmt(end)}`
     : `${fmt(minDate)} – ${fmt(end)}`;
@@ -179,6 +182,7 @@ const eddCache = new Map();
 app.post("/edd", async (req,res)=>{
   const {pincode} = req.body;
   if (!/^[0-9]{6}$/.test(pincode)) return res.json({edd_display:null});
+
   const now = getISTNow();
   const key = `${pincode}-${now.toISOString().slice(0,10)}-${now.getUTCHours()>=11?"PM":"AM"}`;
   if (eddCache.has(key)) return res.json(eddCache.get(key));
@@ -186,6 +190,7 @@ app.post("/edd", async (req,res)=>{
   const city = await getCity(pincode);
   let raw = await getBluedartEDD(pincode);
   let minDate = parseBlueDartDate(raw);
+
   if (!minDate) {
     const sr = await getShiprocketEDD(pincode);
     if (sr) minDate = new Date(sr);
@@ -241,38 +246,25 @@ async function trackShiprocket(awb) {
 app.get("/track", async (req,res)=>{
   const {awb} = req.query;
   if (!awb) return res.status(400).json({error:"AWB required"});
+
+  let data=null;
   const { rows } = await pool.query(
-  "SELECT tracking_source FROM shipments WHERE awb=$1",
-  [awb]
-);
+    "SELECT tracking_source FROM shipments WHERE awb=$1",
+    [awb]
+  );
 
-let data = null;
-
-// 1️⃣ If shipment exists, respect stored source
-if (rows.length > 0) {
-  const src = rows[0].tracking_source;
-
-  if (src === "shiprocket") {
-    data = await trackShiprocket(awb);
-    if (!data) data = await trackBluedart(awb);
+  if (rows.length>0) {
+    const src = rows[0].tracking_source;
+    if (src==="shiprocket") {
+      data = await trackShiprocket(awb) || await trackBluedart(awb);
+    } else {
+      data = await trackBluedart(awb) || await trackShiprocket(awb);
+    }
   } else {
-    data = await trackBluedart(awb);
-    if (!data) data = await trackShiprocket(awb);
+    data = await trackBluedart(awb) || await trackShiprocket(awb);
   }
-}
-// 2️⃣ If NOT in DB → auto-detect (Blue Dart → Shiprocket)
-else {
-  data = await trackBluedart(awb);
-  if (!data) data = await trackShiprocket(awb);
-}
 
-if (!data) {
-  return res.status(404).json({ error: "Tracking details not found" });
-}
-
-res.json(data);
-  if (!data && src!=="shiprocket") data = await trackShiprocket(awb);
-  if (!data) return res.status(404).json({error:"Not found"});
+  if (!data) return res.status(404).json({error:"Tracking details not found"});
   res.json(data);
 });
 
