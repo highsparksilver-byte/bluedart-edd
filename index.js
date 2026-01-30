@@ -1,6 +1,4 @@
 import express from "express";
-import axios from "axios";
-import xml2js from "xml2js";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -31,6 +29,31 @@ app.use((req, res, next) => {
 });
 
 /* ================================
+   RATE LIMITERS (MEMORY)
+================================ */
+const ipHits = new Map();
+const identityHits = new Map();
+
+const WINDOW_MS = 15 * 60 * 1000;
+const IP_LIMIT = 30;
+const ID_LIMIT = 10;
+
+function hit(map, key, limit) {
+  const now = Date.now();
+  const record = map.get(key) || { count: 0, start: now };
+
+  if (now - record.start > WINDOW_MS) {
+    record.count = 0;
+    record.start = now;
+  }
+
+  record.count += 1;
+  map.set(key, record);
+
+  return record.count > limit;
+}
+
+/* ================================
    HELPERS
 ================================ */
 function normalizePhone(input) {
@@ -55,25 +78,38 @@ function normalizeOrderId(input) {
 app.get("/health", (_, res) => res.send("OK"));
 
 /* ================================
-   CUSTOMER TRACKING (SECURE)
+   CUSTOMER TRACKING (SECURED)
 ================================ */
 app.post("/track/customer", async (req, res) => {
   try {
+    const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+
+    if (hit(ipHits, ip, IP_LIMIT)) {
+      return res.status(429).json({ error: "Too many requests. Try later." });
+    }
+
     let { phone, email, order_id, awb } = req.body;
 
     phone = normalizePhone(phone);
     order_id = normalizeOrderId(order_id);
 
-    /* 🔐 SECURITY ENFORCEMENT */
+    /* 🔐 SECURITY RULE */
     if ((order_id || awb) && !phone && !email) {
       return res.status(400).json({
-        error: "Phone number or email is required for verification"
+        error: "Phone or email required for verification"
       });
     }
 
     if (!phone && !email) {
       return res.status(400).json({
-        error: "Phone number or email is required"
+        error: "Phone or email required"
+      });
+    }
+
+    const identityKey = phone || email || order_id || awb;
+    if (hit(identityHits, identityKey, ID_LIMIT)) {
+      return res.status(429).json({
+        error: "Too many attempts for this identifier"
       });
     }
 
@@ -100,20 +136,20 @@ app.post("/track/customer", async (req, res) => {
       where.push(`awb = $${params.length}`);
     }
 
-    const baseQuery = `
+    const { rows } = await pool.query(
+      `
       SELECT *
       FROM shipments
       WHERE (${where.join(" OR ")})
       ORDER BY created_at DESC
-    `;
-
-    const { rows } = await pool.query(baseQuery, params);
+      `,
+      params
+    );
 
     if (!rows.length) {
       return res.json({ error: "No orders found" });
     }
 
-    /* 🧠 SMART VISIBILITY LOGIC */
     const active = rows.filter(r => !r.delivery_confirmed);
 
     if (active.length > 0) {
@@ -136,15 +172,15 @@ app.post("/track/customer", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Customer tracking failed", err.message);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("❌ Tracking error", err.message);
+    res.status(500).json({ error: "Internal error" });
   }
 });
 
 /* ================================
-   SERVER START
+   START SERVER
 ================================ */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("🚀 Ops Logistics running on port", PORT);
-});
+app.listen(PORT, () =>
+  console.log("🚀 Ops Logistics secured on port", PORT)
+);
