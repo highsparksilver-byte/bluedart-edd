@@ -35,7 +35,7 @@ const SHIPROCKET_EMAIL = clean(process.env.SHIPROCKET_EMAIL);
 const SHIPROCKET_PASSWORD = clean(process.env.SHIPROCKET_PASSWORD);
 
 /* ===============================
-   🕒 DATE HELPERS (SUNDAY SAFE)
+   🕒 DATE HELPERS
 ================================ */
 function nowIST() {
   const d = new Date();
@@ -63,13 +63,14 @@ function badgeFor(city) {
 }
 
 /* ===============================
-   🔐 TOKEN CACHE
+   🔐 TOKEN CACHE (EDD ONLY)
 ================================ */
 let bdJwt = null, bdJwtAt = 0;
 let srJwt = null, srJwtAt = 0;
 
 async function getBluedartJwt() {
   if (bdJwt && Date.now() - bdJwtAt < 23 * 60 * 60 * 1000) return bdJwt;
+  // EDD still requires JWT
   const r = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     { headers: { ClientID: CLIENT_ID, clientSecret: CLIENT_SECRET } }
@@ -91,14 +92,13 @@ async function getShiprocketJwt() {
 }
 
 /* ===============================
-   📅 EDD LOGIC (SMART BUFFER)
+   📅 EDD LOGIC
 ================================ */
 function confidenceBand(fastestDate) {
   if (!fastestDate || isNaN(fastestDate.getTime())) return null;
 
   const now = nowIST();
   let addDays = 1;
-  // If Sat > 11am OR Sunday, add 2 days
   if ((now.getDay() === 6 && now.getHours() >= 11) || now.getDay() === 0) {
     addDays = 2;
   }
@@ -168,7 +168,7 @@ app.post("/edd", async (req, res) => {
 });
 
 /* ===============================
-   🚚 TRACKING LOGIC (XML + JWT)
+   🚚 TRACKING LOGIC (GOOGLE SCRIPT CLONE)
 ================================ */
 function getStatusType(s = "") {
   s = s.toUpperCase();
@@ -190,14 +190,24 @@ function normalizeStatus(v) {
 
 async function trackBluedart(awb) {
   try {
-    const jwt = await getBluedartJwt();
-    const url = `https://apigateway.bluedart.com/in/transportation/tracking/v1/shipment?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}&awb=awb&numbers=${awb}&format=xml&lickey=${BD_LICENCE_KEY_TRACK}&scan=1`;
+    // 🎯 MIMICKING GOOGLE SCRIPT EXACTLY (Legacy Endpoint + verno=1)
+    const url = `https://api.bluedart.com/servlet/RoutingServlet`;
+    const params = {
+      handler: 'tnt',
+      action: 'custawbquery',
+      loginid: LOGIN_ID,
+      awb: 'awb',
+      numbers: awb,
+      format: 'xml',
+      lickey: BD_LICENCE_KEY_TRACK,
+      verno: 1, // ✅ The missing piece from GAS
+      scan: 1
+    };
+
+    const r = await axios.get(url, { params, responseType: "text", timeout: 8000 });
     
-    const r = await axios.get(url, { 
-        headers: { JWTToken: jwt }, 
-        responseType: "text", 
-        timeout: 8000 
-    });
+    // Check if response is HTML (Error)
+    if (r.data.includes("<html") || r.data.includes("<HTML")) return null;
 
     const parsed = await xml2js.parseStringPromise(r.data, { explicitArray: false });
     const s = parsed?.ShipmentData?.Shipment;
