@@ -26,11 +26,11 @@ app.use((req, res, next) => {
   next();
 });
 
-const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
-
 /* ===============================
    🔑 ENV
 ================================ */
+const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
+
 const CLIENT_ID = clean(process.env.CLIENT_ID);
 const CLIENT_SECRET = clean(process.env.CLIENT_SECRET);
 const LOGIN_ID = clean(process.env.LOGIN_ID);
@@ -47,8 +47,7 @@ console.log("🚀 Ops Logistics running");
    📅 CONSTANTS
 ================================ */
 const HOLIDAYS = [
-  "2026-01-26", "2026-03-03", "2026-08-15",
-  "2026-10-02", "2026-11-01"
+  "2026-01-26","2026-03-03","2026-08-15","2026-10-02","2026-11-01"
 ];
 
 const METROS = [
@@ -58,13 +57,13 @@ const METROS = [
 ];
 
 /* ===============================
-   🔐 JWT CACHE
+   🔐 TOKEN CACHE
 ================================ */
-let bdJwt=null, bdJwtAt=0;
-let srJwt=null, srJwtAt=0;
+let bdJwt = null, bdJwtAt = 0;
+let srJwt = null, srJwtAt = 0;
 
 async function getBluedartJwt() {
-  if (bdJwt && Date.now()-bdJwtAt < 23*60*60*1000) return bdJwt;
+  if (bdJwt && Date.now() - bdJwtAt < 23 * 60 * 60 * 1000) return bdJwt;
   const r = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     { headers:{ Accept:"application/json", ClientID:CLIENT_ID, clientSecret:CLIENT_SECRET } }
@@ -76,18 +75,20 @@ async function getBluedartJwt() {
 
 async function getShiprocketJwt() {
   if (!SR_EMAIL || !SR_PASSWORD) return null;
-  if (srJwt && Date.now()-srJwtAt < 8*24*60*60*1000) return srJwt;
+  if (srJwt && Date.now() - srJwtAt < 7 * 24 * 60 * 60 * 1000) return srJwt;
+
   const r = await axios.post(
     "https://apiv2.shiprocket.in/v1/external/auth/login",
     { email: SR_EMAIL, password: SR_PASSWORD }
   );
   srJwt = r.data.token;
   srJwtAt = Date.now();
+  console.log("🔐 Shiprocket token refreshed");
   return srJwt;
 }
 
 /* ===============================
-   🕒 DATE HELPERS (EDD SAFE)
+   🕒 DATE HELPERS
 ================================ */
 function getISTNow() {
   const n = new Date();
@@ -95,7 +96,6 @@ function getISTNow() {
 }
 
 function isHoliday(d) {
-  if (!d || isNaN(d.getTime())) return false;
   return d.getUTCDay() === 0 || HOLIDAYS.includes(d.toISOString().slice(0,10));
 }
 
@@ -105,46 +105,12 @@ function getNextWorkingDate() {
   return d;
 }
 
-function parseBlueDartDate(str) {
-  if (!str) return null;
-  const [dd, mon, yyyy] = str.split("-");
-  const m = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
-  if (m[mon] === undefined) return null;
-  const d = new Date(Date.UTC(+yyyy, m[mon], +dd));
-  return isNaN(d.getTime()) ? null : d;
-}
-
-function confidenceBand(minDate) {
-  const now = getISTNow();
-  const day = now.getUTCDay();
-  const hour = now.getUTCHours();
-  const add = ((day === 6 && hour >= 11) || day === 0) ? 2 : 1;
-
-  const end = new Date(minDate.getTime());
-  end.setUTCDate(end.getUTCDate() + add);
-
-  const fmt = d => `${d.getUTCDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()]}`;
-
-  return minDate.getUTCMonth() === end.getUTCMonth()
-    ? `${minDate.getUTCDate()}–${fmt(end)}`
-    : `${fmt(minDate)} – ${fmt(end)}`;
-}
-
-function getBadge(minDate, city) {
-  if (!minDate) return "STANDARD";
-  const diff = Math.round((minDate.getTime()+5.5e6 - getISTNow()) / 86400000);
-  const isMetro = METROS.some(m => (city||"").toUpperCase().includes(m));
-  if (isMetro && diff <= 2) return "METRO_EXPRESS";
-  if (diff <= 3) return "EXPRESS";
-  return "STANDARD";
-}
-
 /* ===============================
-   📦 EDD ROUTE
+   📦 EDD
 ================================ */
 async function getCity(pin) {
   try {
-    const r = await axios.get(`https://api.postalpincode.in/pincode/${pin}`,{timeout:3000});
+    const r = await axios.get(`https://api.postalpincode.in/pincode/${pin}`);
     return r.data?.[0]?.PostOffice?.[0]?.District || null;
   } catch { return null; }
 }
@@ -169,68 +135,30 @@ async function getBluedartEDD(pin) {
   } catch { return null; }
 }
 
-async function getShiprocketEDD(pin) {
-  try {
-    const t = await getShiprocketJwt();
-    if (!t) return null;
-    const r = await axios.get(
-      `https://apiv2.shiprocket.in/v1/external/courier/serviceability/?pickup_postcode=411022&delivery_postcode=${pin}&cod=1&weight=0.5`,
-      { headers:{Authorization:`Bearer ${t}`} }
-    );
-    return r.data?.data?.available_courier_companies?.[0]?.etd || null;
-  } catch { return null; }
-}
-
-const eddCache = new Map();
-
-app.post("/edd", async (req,res)=>{
-  const { pincode } = req.body;
-  if (!/^[0-9]{6}$/.test(pincode)) return res.json({edd_display:null});
-
-  const now = getISTNow();
-  const key = `${pincode}-${now.toISOString().slice(0,10)}-${now.getUTCHours()>=11?"PM":"AM"}`;
-  if (eddCache.has(key)) return res.json(eddCache.get(key));
-
-  const city = await getCity(pincode);
-  let raw = await getBluedartEDD(pincode);
-  let minDate = parseBlueDartDate(raw);
-
-  if (!minDate) {
-    const sr = await getShiprocketEDD(pincode);
-    if (sr) minDate = new Date(sr);
-  }
-
-  if (!minDate) return res.json({edd_display:null});
-
-  const out = { edd_display:confidenceBand(minDate), city, badge:getBadge(minDate,city) };
-  eddCache.set(key,out);
-  res.json(out);
-});
-
 /* ===============================
-   🚚 TRACKING HELPERS
+   🚚 TRACKING
 ================================ */
-function normalizeStatus(raw) {
-  if (!raw) return "IN TRANSIT";
-  if (raw.toUpperCase().includes("DELIVERED")) return "DELIVERED";
-  if (raw.toUpperCase().includes("OUT")) return "OUT FOR DELIVERY";
-  if (raw.toUpperCase().includes("RTO")) return "RTO";
-  if (raw.toUpperCase().includes("NDR")) return "NDR";
-  return "IN TRANSIT";
-}
-
 async function trackBluedart(awb) {
   try {
     const url = `https://api.bluedart.com/servlet/RoutingServlet?handler=tnt&action=custawbquery&loginid=${LOGIN_ID}&awb=awb&numbers=${awb}&format=xml&lickey=${LICENCE_KEY_TRACK}&verno=1&scan=1`;
-    const r = await axios.get(url,{responseType:"text",timeout:8000});
-    const p = await new Promise((res,rej)=>xml2js.parseString(r.data,{explicitArray:false},(e,o)=>e?rej(e):res(o)));
-    const s = p?.ShipmentData?.Shipment;
-    if (!s) return null;
+    const r = await axios.get(url,{responseType:"text"});
+    const parsed = await new Promise((res,rej)=>
+      xml2js.parseString(r.data,{explicitArray:false},(e,o)=>e?rej(e):res(o))
+    );
+
+    const s = parsed?.ShipmentData?.Shipment;
+    if (!s || !s.Status) return null;
+
+    const delivered = s.Status.toUpperCase().includes("DELIVERED");
+
     return {
       source:"bluedart",
       actual_courier:"Blue Dart",
-      status: normalizeStatus(s.Status),
-      scans: Array.isArray(s.Scans?.ScanDetail) ? s.Scans.ScanDetail : [s.Scans?.ScanDetail]
+      status: delivered ? "DELIVERED" : "IN TRANSIT",
+      delivered,
+      raw: Array.isArray(s.Scans?.ScanDetail)
+        ? s.Scans.ScanDetail
+        : [s.Scans?.ScanDetail]
     };
   } catch { return null; }
 }
@@ -239,53 +167,105 @@ async function trackShiprocket(awb) {
   try {
     const t = await getShiprocketJwt();
     if (!t) return null;
+
     const r = await axios.get(
       `https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`,
-      { headers:{Authorization:`Bearer ${t}`}, timeout:8000 }
+      { headers:{Authorization:`Bearer ${t}`} }
     );
+
     const td = r.data.tracking_data;
     if (!td) return null;
+
+    const delivered =
+      td.current_status?.toUpperCase() === "DELIVERED" ||
+      td.delivered_date ||
+      td.shipment_track?.some(s => s["sr-status-label"] === "DELIVERED");
+
     return {
       source:"shiprocket",
       actual_courier:td.courier_name,
-      status: normalizeStatus(td.current_status),
-      scans: td.shipment_track || []
+      status: delivered ? "DELIVERED" : "IN TRANSIT",
+      delivered,
+      raw: td.shipment_track || []
     };
   } catch { return null; }
 }
 
 /* ===============================
-   🔒 SHOPIFY SAFETY GUARD
+   💾 SAFE PERSIST (NO UNKNOWN AWB)
 ================================ */
-async function awbExists(awb) {
-  const r = await pool.query(
-    "SELECT 1 FROM shipments WHERE awb=$1 LIMIT 1",
+async function persistTracking(awb, data) {
+  const { rows } = await pool.query(
+    "SELECT 1 FROM shipments WHERE awb=$1",
     [awb]
   );
-  return r.rowCount > 0;
+
+  if (rows.length === 0) {
+    console.warn("⚠️ Unknown AWB ignored:", awb);
+    return;
+  }
+
+  await pool.query(
+    `
+    UPDATE shipments SET
+      tracking_source=$2,
+      actual_courier=$3,
+      last_known_status=$4,
+      delivered_at=COALESCE(delivered_at,$5),
+      next_check_at=CASE
+        WHEN $6 THEN '9999-01-01'
+        ELSE now() + interval '6 hours'
+      END,
+      updated_at=now()
+    WHERE awb=$1
+    `,
+    [
+      awb,
+      data.source,
+      data.actual_courier,
+      data.status,
+      data.delivered ? new Date() : null,
+      data.delivered
+    ]
+  );
 }
 
 /* ===============================
-   🚚 TRACK ROUTE (SAFE)
+   🚚 TRACK ROUTE
 ================================ */
 app.get("/track", async (req,res)=>{
   const { awb } = req.query;
   if (!awb) return res.status(400).json({error:"awb_required"});
 
-  const exists = await awbExists(awb);
-  if (!exists) return res.status(404).json({error:"not_found"});
-
   let data = await trackBluedart(awb);
   if (!data) data = await trackShiprocket(awb);
-  if (!data) return res.status(500).json({error:"tracking_failed"});
+  if (!data) return res.status(404).json({error:"not_found"});
 
-  res.json({
-    source: data.source,
-    actual_courier: data.actual_courier,
-    status: data.status,
-    delivered: data.status === "DELIVERED",
-    raw: data.scans
-  });
+  await persistTracking(awb,data);
+  res.json(data);
+});
+
+/* ===============================
+   ⏱ CRON
+================================ */
+app.post("/_cron/track/run", async (_, res) => {
+  const { rows } = await pool.query(`
+    SELECT awb FROM shipments
+    WHERE delivered_at IS NULL
+      AND next_check_at <= now()
+    LIMIT 25
+  `);
+
+  let processed = 0;
+  for (const r of rows) {
+    let data = await trackBluedart(r.awb);
+    if (!data) data = await trackShiprocket(r.awb);
+    if (!data) continue;
+    await persistTracking(r.awb,data);
+    processed++;
+  }
+
+  res.json({ ok:true, processed });
 });
 
 /* ===============================
