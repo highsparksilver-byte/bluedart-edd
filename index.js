@@ -1,18 +1,13 @@
 import express from "express";
 import axios from "axios";
 import xml2js from "xml2js";
-import crypto from "crypto";
 import pg from "pg";
 
 /* ===============================
    🚀 APP INIT
 ================================ */
 const app = express();
-app.use(express.json({ verify: rawBodySaver }));
-
-function rawBodySaver(req, res, buf) {
-  req.rawBody = buf;
-}
+app.use(express.json());
 
 /* ===============================
    🌍 CORS
@@ -28,8 +23,6 @@ app.use((req, res, next) => {
 /* ===============================
    🔑 ENV
 ================================ */
-const clean = v => v?.replace(/\r|\n|\t/g, "").trim();
-
 const {
   DATABASE_URL,
   CLIENT_ID,
@@ -38,8 +31,7 @@ const {
   BD_LICENCE_KEY_EDD,
   BD_LICENCE_KEY_TRACK,
   SHIPROCKET_EMAIL,
-  SHIPROCKET_PASSWORD,
-  SHOPIFY_WEBHOOK_SECRET
+  SHIPROCKET_PASSWORD
 } = process.env;
 
 /* ===============================
@@ -52,36 +44,7 @@ const pool = new Pool({
 });
 
 /* ===============================
-   🧱 DB SCHEMA (SAFE)
-================================ */
-async function bootstrapDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS orders_ops (
-      shopify_order_id TEXT PRIMARY KEY,
-      order_name TEXT,
-      payment_type TEXT,
-      order_total NUMERIC,
-      financial_status TEXT,
-      created_at TIMESTAMP DEFAULT now()
-    );
-
-    CREATE TABLE IF NOT EXISTS shipments (
-      awb TEXT PRIMARY KEY,
-      shopify_order_id TEXT,
-      platform TEXT,
-      actual_courier TEXT,
-      last_known_status TEXT,
-      delivered_at TIMESTAMP,
-      next_check_at TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT now()
-    );
-  `);
-  console.log("✅ DB schema ready");
-}
-bootstrapDB();
-
-/* ===============================
-   🕒 IST TIME
+   🕒 DATE (IST SAFE)
 ================================ */
 function nowIST() {
   const d = new Date();
@@ -89,7 +52,7 @@ function nowIST() {
 }
 
 /* ===============================
-   🏙️ METROS (BADGE ONLY)
+   🏙️ METRO BADGE
 ================================ */
 const METROS = [
   "MUMBAI","DELHI","NEW DELHI","NOIDA","GURGAON","GURUGRAM",
@@ -137,6 +100,7 @@ async function getShiprocketJwt() {
 ================================ */
 function confidenceBand(fastestDate) {
   if (!fastestDate) return null;
+
   const start = new Date(fastestDate);
   const end = new Date(start);
   end.setDate(end.getDate() + 1);
@@ -197,9 +161,6 @@ async function getShiprocketEDD(pin) {
   }
 }
 
-/* ===============================
-   📦 EDD API
-================================ */
 app.post("/edd", async (req, res) => {
   const { pincode } = req.body;
   if (!/^[0-9]{6}$/.test(pincode))
@@ -208,7 +169,6 @@ app.post("/edd", async (req, res) => {
   const city = await getCity(pincode);
   let fastest = await getBluedartEDD(pincode);
   if (!fastest) fastest = await getShiprocketEDD(pincode);
-
   if (!fastest) return res.json({ edd_display: null });
 
   res.json({
@@ -219,13 +179,21 @@ app.post("/edd", async (req, res) => {
 });
 
 /* ===============================
-   🚚 TRACKING (UNCHANGED)
+   🚚 TRACKING (PATCHED)
 ================================ */
 function normalizeStatus(v) {
-  if (!v) return "IN TRANSIT";
+  if (!v) return null;
   return v.toUpperCase().includes("DELIVERED")
     ? "DELIVERED"
     : "IN TRANSIT";
+}
+
+/* 🔒 STRICT BD VALIDATION */
+function isValidBluedart(shipment) {
+  if (!shipment) return false;
+  if (shipment.Status && shipment.Status.trim() !== "") return true;
+  if (shipment.Scans?.ScanDetail) return true;
+  return false;
 }
 
 async function trackBluedart(awb) {
@@ -234,16 +202,19 @@ async function trackBluedart(awb) {
     const r = await axios.get(url, { responseType: "text" });
     const p = await xml2js.parseStringPromise(r.data, { explicitArray: false });
     const s = p?.ShipmentData?.Shipment;
-    if (!s) return null;
+
+    if (!isValidBluedart(s)) return null;
+
+    const scans = Array.isArray(s.Scans?.ScanDetail)
+      ? s.Scans.ScanDetail
+      : [s.Scans?.ScanDetail].filter(Boolean);
 
     return {
       source: "bluedart",
       actual_courier: "Blue Dart",
-      status: normalizeStatus(s.Status),
+      status: normalizeStatus(s.Status) || "IN TRANSIT",
       delivered: normalizeStatus(s.Status) === "DELIVERED",
-      raw: Array.isArray(s.Scans?.ScanDetail)
-        ? s.Scans.ScanDetail
-        : [s.Scans?.ScanDetail || null]
+      raw: scans.length ? scans : [null]
     };
   } catch {
     return null;
@@ -259,7 +230,7 @@ async function trackShiprocket(awb) {
     );
 
     const td = r.data?.tracking_data;
-    if (!td) return null;
+    if (!td || !td.current_status) return null;
 
     return {
       source: "shiprocket",
@@ -285,53 +256,10 @@ app.get("/track", async (req, res) => {
 });
 
 /* ===============================
-   🛍️ SHOPIFY WEBHOOKS (READ ONLY)
+   🧾 SHOPIFY WEBHOOKS (PHASE 2)
 ================================ */
-function verifyShopify(req) {
-  const hmac = req.headers["x-shopify-hmac-sha256"];
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(req.rawBody, "utf8")
-    .digest("base64");
-  return digest === hmac;
-}
-
-app.post("/webhooks/orders_paid", async (req, res) => {
-  if (!verifyShopify(req)) return res.sendStatus(401);
-  const o = req.body;
-
-  await pool.query(
-    `
-    INSERT INTO orders_ops
-      (shopify_order_id, order_name, payment_type, order_total, financial_status)
-    VALUES ($1,$2,$3,$4,$5)
-    ON CONFLICT (shopify_order_id) DO NOTHING
-    `,
-    [
-      o.id,
-      o.name,
-      o.gateway === "cod" ? "COD" : "PREPAID",
-      o.total_price,
-      o.financial_status
-    ]
-  );
-  res.sendStatus(200);
-});
-
-app.post("/webhooks/fulfillment_create", async (req, res) => {
-  if (!verifyShopify(req)) return res.sendStatus(401);
-  const f = req.body;
-  const awb = f.tracking_numbers?.[0];
-  if (!awb) return res.sendStatus(200);
-
-  await pool.query(
-    `
-    INSERT INTO shipments (awb, shopify_order_id, platform)
-    VALUES ($1,$2,$3)
-    ON CONFLICT (awb) DO NOTHING
-    `,
-    [awb, f.order_id, "shopify"]
-  );
+app.post("/webhooks/orders_paid", (req, res) => {
+  console.log("🧾 orders_paid webhook received");
   res.sendStatus(200);
 });
 
@@ -345,5 +273,5 @@ app.get("/health", (_, res) => res.send("OK"));
 ================================ */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log("🚀 Ops Logistics Phase 2 running on", PORT)
+  console.log("🚀 Ops Logistics running on", PORT)
 );
