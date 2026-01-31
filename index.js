@@ -6,7 +6,7 @@ import xml2js from "xml2js";
    🚀 APP INIT
 ================================ */
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 /* ===============================
    🌍 CORS
@@ -44,7 +44,7 @@ function nowIST() {
 
 function getNextWorkingDate() {
   const d = nowIST();
-  if (d.getDay() === 0) d.setDate(d.getDate() + 1); 
+  if (d.getDay() === 0) d.setDate(d.getDate() + 1);
   return `/Date(${d.getTime()})/`;
 }
 
@@ -59,18 +59,19 @@ const METROS = [
 
 function badgeFor(city) {
   if (!city) return "EXPRESS";
-  return METROS.some(m => city.toUpperCase().includes(m)) ? "METRO_EXPRESS" : "EXPRESS";
+  return METROS.some(m => city.toUpperCase().includes(m))
+    ? "METRO_EXPRESS"
+    : "EXPRESS";
 }
 
 /* ===============================
-   🔐 TOKEN CACHE (EDD ONLY)
+   🔐 TOKEN CACHE
 ================================ */
 let bdJwt = null, bdJwtAt = 0;
 let srJwt = null, srJwtAt = 0;
 
 async function getBluedartJwt() {
   if (bdJwt && Date.now() - bdJwtAt < 23 * 60 * 60 * 1000) return bdJwt;
-  // EDD still requires JWT
   const r = await axios.get(
     "https://apigateway.bluedart.com/in/transportation/token/v1/login",
     { headers: { ClientID: CLIENT_ID, clientSecret: CLIENT_SECRET } }
@@ -92,7 +93,7 @@ async function getShiprocketJwt() {
 }
 
 /* ===============================
-   📅 EDD LOGIC
+   📅 EDD
 ================================ */
 function confidenceBand(fastestDate) {
   if (!fastestDate || isNaN(fastestDate.getTime())) return null;
@@ -105,9 +106,10 @@ function confidenceBand(fastestDate) {
 
   const start = new Date(fastestDate);
   const end = new Date(start);
-  end.setDate(end.getDate() + addDays); 
+  end.setDate(end.getDate() + addDays);
 
-  const fmt = d => `${String(d.getDate()).padStart(2,"0")}-${["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"][d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
+  const fmt = d =>
+    `${String(d.getDate()).padStart(2,"0")}-${["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"][d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
 
   return `${fmt(start)}–${fmt(end)}`;
 }
@@ -266,9 +268,50 @@ app.get("/track", async (req, res) => {
   res.json(data);
 });
 
+
+/* ===============================
+   🧾 OPS – PHASE 3A
+================================ */
+const OPS_ORDERS = [];
+
+/**
+ * Shopify: Orders Paid Webhook
+ */
+app.post("/webhooks/orders_paid", (req, res) => {
+  try {
+    const o = req.body || {};
+
+    OPS_ORDERS.push({
+      order_id: o.id || null,
+      order_name: o.name || null,
+      financial_status: o.financial_status || null,
+      awb: null,
+      courier_source: "unknown",
+      created_at: new Date().toISOString()
+    });
+
+    return res.sendStatus(200);
+  } catch {
+    return res.sendStatus(200); // never fail Shopify
+  }
+});
+
+/**
+ * Internal Ops View
+ */
+app.get("/ops/orders", (_, res) => {
+  res.json({ count: OPS_ORDERS.length, orders: OPS_ORDERS });
+});
+
+/* ===============================
+   ❤️ HEALTH
+================================ */
+app.get("/health", (_, res) => res.send("OK"));
+
 /* ===============================
    🚀 START
 ================================ */
-app.get("/health", (_, res) => res.send("OK"));
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🚀 Ops Logistics running on", PORT));
+app.listen(PORT, () =>
+  console.log("🚀 Ops Logistics running on", PORT)
+);
